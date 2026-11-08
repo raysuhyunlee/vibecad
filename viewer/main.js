@@ -1,0 +1,748 @@
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const $ = (id) => document.getElementById(id);
+const stage = $("stage"), viewport = $("viewport"), ink = $("ink"), input = $("input");
+const accent = new THREE.Color("#e8590c");
+const CLICK_SLOP = 4;
+const MAX_SHOT = 1400;
+
+// --- Scene ------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(devicePixelRatio);
+viewport.append(renderer.domElement);
+const scene = new THREE.Scene();
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 1.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+scene.add(sun);
+const camera = new THREE.PerspectiveCamera(35, 1, 1, 1e5);
+camera.up.set(0, 0, 1);
+camera.position.set(1, -1, 0.8);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.15;
+const world = new THREE.Group();
+scene.add(world);
+const raycaster = new THREE.Raycaster();
+
+const dark = matchMedia("(prefers-color-scheme: dark)");
+const partMaterial = new THREE.MeshStandardMaterial({
+  color: 0xb4b8bf, metalness: 0.05, roughness: 0.65,
+  polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+});
+const ghostMaterial = new THREE.MeshStandardMaterial({ color: 0xb4b8bf, transparent: true, opacity: 0.12, depthWrite: false });
+const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x24262b });
+const hoverMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
+const pickedMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide });
+const flashMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide });
+
+// --- State ------------------------------------------------------------------
+let model = null;
+let parts = new Map(); // path -> { info, mesh, edges, groups, geometry }
+let stepMeshes = {};
+let selectedPart = null;
+let previewStep = null;
+let previewObject = null;
+let previous = null; // last model, to flash what changed
+let fitted = false;
+let hoverOverlay = null;
+let flashOverlays = [];
+let flashUntil = 0;
+const refs = []; // { n, part, face, point, overlay, el } | { n, stroke, faces }
+let nextRef = 1;
+let drawMode = false;
+let running = false;
+let hoverKey = "";
+
+function decode(b64, Type) {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  return new Type(bytes.buffer);
+}
+function geometryOf(m) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(decode(m.positions, Float32Array), 3));
+  g.setAttribute("normal", new THREE.BufferAttribute(decode(m.normals, Float32Array), 3));
+  g.setIndex(new THREE.BufferAttribute(decode(m.indices, Uint32Array), 1));
+  return g;
+}
+function disposeTree(o) {
+  o.traverse((c) => c.geometry?.dispose());
+}
+
+async function loadModel() {
+  const res = await fetch("/model");
+  if (!res.ok) return;
+  const data = await res.json();
+  previous = model;
+  model = data.model;
+  stepMeshes = data.meshes.steps;
+
+  disposeTree(world);
+  world.clear();
+  parts = new Map();
+  previewStep = null;
+  previewObject = null;
+  hoverOverlay = null;
+  hoverKey = "";
+  flashOverlays = [];
+
+  for (const m of data.meshes.parts) {
+    const info = model.parts.find((p) => p.path === m.path);
+    const geometry = geometryOf(m);
+    const mesh = new THREE.Mesh(geometry, partMaterial);
+    mesh.userData.path = m.path;
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 28), edgeMaterial);
+    const part = { info, mesh, edges, geometry, groups: m.faceGroups };
+    world.add(mesh, edges);
+    parts.set(m.path, part);
+  }
+
+  if (!fitted) {
+    fit();
+    fitted = true;
+  }
+  // Refs stay on the model through rebuilds when their face still exists.
+  for (const r of [...refs]) {
+    if (!r.part) continue;
+    if (parts.get(r.part)?.info.faces.some((f) => f.id === r.face)) {
+      r.overlay = overlayFor(r.part, r.face, pickedMaterial);
+    } else removeRef(r);
+  }
+  flashChanges();
+  renderDesign();
+  renderRefs();
+}
+
+/** Faces whose semantic id is new, or whose geometry moved, glow for a moment. */
+function flashChanges() {
+  if (!previous) return;
+  const before = new Map(previous.parts.map((p) => [p.path, new Map(p.faces.map((f) => [f.id, f]))]));
+  for (const [path, part] of parts) {
+    const old = before.get(path);
+    const changed = part.info.faces.filter((f) => {
+      const o = old?.get(f.id);
+      return !o || o.area !== f.area || String(o.center) !== String(f.center);
+    });
+    for (const f of changed) flashOverlays.push(overlayFor(path, f.id, flashMaterial));
+  }
+  if (flashOverlays.length) flashUntil = performance.now() + 2500;
+}
+
+function faceIndexAtTriangle(groups, tri) {
+  for (let i = 0; i < groups.length; i += 3) {
+    if (tri >= groups[i] && tri < groups[i] + groups[i + 1]) return groups[i + 2];
+  }
+  return -1;
+}
+
+function overlayFor(path, faceId, material) {
+  const part = parts.get(path);
+  const faceIndex = part.info.faces.findIndex((f) => f.id === faceId);
+  const source = part.geometry.index.array;
+  const idx = [];
+  for (let i = 0; i < part.groups.length; i += 3) {
+    if (part.groups[i + 2] !== faceIndex) continue;
+    const start = part.groups[i] * 3, end = start + part.groups[i + 1] * 3;
+    for (let t = start; t < end; t++) idx.push(source[t]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", part.geometry.getAttribute("position"));
+  g.setIndex(idx);
+  const m = new THREE.Mesh(g, material);
+  m.renderOrder = 2;
+  world.add(m);
+  return m;
+}
+function dropOverlay(o) {
+  if (!o) return;
+  world.remove(o);
+  o.geometry.deleteAttribute("position"); // shared with the part
+  o.geometry.dispose();
+}
+
+function fit() {
+  const box = new THREE.Box3();
+  for (const p of parts.values()) box.expandByObject(p.mesh);
+  if (box.isEmpty()) return;
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
+  const dist = (radius * 1.15) / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2));
+  const dir = camera.position.clone().sub(controls.target);
+  if (dir.lengthSq() < 1e-9) dir.set(1, -1, 0.8);
+  camera.position.copy(center).add(dir.normalize().multiplyScalar(dist));
+  camera.near = dist / 100;
+  camera.far = dist * 20;
+  camera.updateProjectionMatrix();
+  controls.target.copy(center);
+}
+
+function resize() {
+  const { clientWidth: w, clientHeight: h } = stage;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  ink.width = w * devicePixelRatio;
+  ink.height = h * devicePixelRatio;
+}
+new ResizeObserver(resize).observe(stage);
+
+// --- Picking ----------------------------------------------------------------
+function ndc(e) {
+  const r = stage.getBoundingClientRect();
+  return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+}
+function pick(e) {
+  raycaster.setFromCamera(ndc(e), camera);
+  const meshes = [...parts.values()].filter((p) => p.mesh.visible).map((p) => p.mesh);
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  if (!hit) return null;
+  const path = hit.object.userData.path;
+  const part = parts.get(path);
+  const face = part.info.faces[faceIndexAtTriangle(part.groups, hit.faceIndex)];
+  return face ? { part: path, face, point: hit.point } : null;
+}
+function worldAt(e) {
+  const hit = pick(e);
+  if (hit) return { point: hit.point, hit };
+  raycaster.setFromCamera(ndc(e), camera);
+  const n = camera.getWorldDirection(new THREE.Vector3());
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, controls.target);
+  const point = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
+  return point ? { point, hit: null } : null;
+}
+
+
+function hover(e) {
+  const hit = e ? pick(e) : null;
+  const key = hit ? `${hit.part}|${hit.face.id}` : "";
+  const tip = $("tip");
+  if (key !== hoverKey) {
+    hoverKey = key;
+    dropOverlay(hoverOverlay);
+    hoverOverlay = hit ? overlayFor(hit.part, hit.face.id, hoverMaterial) : null;
+    if (hit) tip.textContent = `${hit.part}/${hit.face.id}`;
+  }
+  tip.hidden = !hit;
+  if (hit) {
+    const r = stage.getBoundingClientRect();
+    tip.style.left = `${e.clientX - r.left + 12}px`;
+    tip.style.top = `${e.clientY - r.top + 12}px`;
+  }
+}
+
+// --- Pointing ---------------------------------------------------------------
+function addPin(hit) {
+  const r = {
+    n: nextRef++, part: hit.part, face: hit.face.id, point: hit.point.clone(),
+    overlay: overlayFor(hit.part, hit.face.id, pickedMaterial),
+  };
+  refs.push(r);
+  insertToken(r.n);
+  showSource(hit.face.src);
+  renderRefs();
+}
+function removeRef(r) {
+  const i = refs.indexOf(r);
+  if (i >= 0) refs.splice(i, 1);
+  dropOverlay(r.overlay);
+  input.value = input.value.replace(new RegExp(`\\s?\\[${r.n}\\]`), "");
+  renderRefs();
+}
+function clearRefs() {
+  for (const r of refs) dropOverlay(r.overlay);
+  refs.length = 0;
+  nextRef = 1;
+  renderRefs();
+}
+function renderRefs() {
+  const box = $("refs");
+  box.replaceChildren(...refs.map((r) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.title = `Remove [${r.n}]`;
+    const b = document.createElement("b");
+    b.textContent = r.n;
+    const span = document.createElement("span");
+    span.textContent = r.stroke ? (r.faces.length ? `${r.faces.length} faces` : "drawing") : `${r.part}/${r.face}`;
+    chip.append(b, span);
+    chip.insertAdjacentHTML("beforeend", '<svg><use href="#i-x"/></svg>');
+    chip.onclick = () => removeRef(r);
+    return chip;
+  }));
+  const pins = $("pins");
+  pins.replaceChildren(...refs.map((r) => {
+    const el = document.createElement("button");
+    el.className = "pin";
+    el.textContent = r.n;
+    el.setAttribute("aria-label", `Remove reference ${r.n}`);
+    el.onclick = () => removeRef(r);
+    r.el = el;
+    return el;
+  }));
+}
+
+// Pointer gestures: click pins a face, drag orbits, or draws in draw mode.
+let down = null;
+let stroke = null;
+const canvas = renderer.domElement;
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  down = { x: e.clientX, y: e.clientY };
+  if (drawMode) {
+    stroke = { points: [], faces: new Map() };
+    canvas.setPointerCapture(e.pointerId);
+    extendStroke(e);
+  }
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (stroke) return extendStroke(e);
+  if (!e.buttons) hover(e);
+  else hover(null);
+});
+canvas.addEventListener("pointerleave", () => hover(null));
+canvas.addEventListener("pointerup", (e) => {
+  if (stroke) return finishStroke();
+  if (!down) return;
+  const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+  down = null;
+  if (moved > CLICK_SLOP) return;
+  const hit = pick(e);
+  if (hit) addPin(hit);
+});
+function extendStroke(e) {
+  const at = worldAt(e);
+  if (!at) return;
+  stroke.points.push(at.point.clone());
+  if (at.hit) stroke.faces.set(`${at.hit.part}|${at.hit.face.id}`, { part: at.hit.part, face: at.hit.face.id, point: at.point.clone() });
+}
+function finishStroke() {
+  const s = stroke;
+  stroke = null;
+  down = null;
+  if (s.points.length < 2) return;
+  const r = { n: nextRef++, stroke: s.points, faces: [...s.faces.values()].slice(0, 12), point: s.points[0] };
+  refs.push(r);
+  insertToken(r.n);
+  renderRefs();
+}
+function setDraw(on) {
+  drawMode = on;
+  controls.enabled = !on;
+  $("draw").setAttribute("aria-pressed", on);
+  stage.classList.toggle("drawing", on);
+}
+
+// --- Frame ------------------------------------------------------------------
+function project(v) {
+  const p = v.clone().project(camera);
+  return { x: ((p.x + 1) / 2) * stage.clientWidth, y: ((1 - p.y) / 2) * stage.clientHeight, front: p.z < 1 };
+}
+function drawInk(ctx, scale) {
+  ctx.lineWidth = 3 * scale;
+  ctx.lineJoin = ctx.lineCap = "round";
+  ctx.strokeStyle = "#e8590c";
+  const line = (points) => {
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const s = project(p);
+      ctx[i ? "lineTo" : "moveTo"](s.x * scale, s.y * scale);
+    });
+    ctx.stroke();
+  };
+  for (const r of refs) if (r.stroke) line(r.stroke);
+  if (stroke) line(stroke.points);
+}
+function frame(now) {
+  requestAnimationFrame(frame);
+  controls.update();
+  sun.position.copy(camera.position);
+  if (flashOverlays.length) {
+    const left = flashUntil - now;
+    flashMaterial.opacity = Math.max(0, Math.min(1, left / 1200)) * 0.7;
+    if (left <= 0) {
+      flashOverlays.forEach(dropOverlay);
+      flashOverlays = [];
+    }
+  }
+  renderer.render(scene, camera);
+  const ctx = ink.getContext("2d");
+  ctx.clearRect(0, 0, ink.width, ink.height);
+  drawInk(ctx, devicePixelRatio);
+  for (const r of refs) {
+    if (!r.el) continue;
+    const s = project(r.point);
+    r.el.style.transform = `translate(${s.x}px, ${s.y}px)`;
+    r.el.style.visibility = s.front ? "visible" : "hidden";
+  }
+}
+requestAnimationFrame(frame);
+
+/** What the person sees, including their pins and strokes. */
+function screenshot() {
+  renderer.render(scene, camera);
+  const src = renderer.domElement;
+  const scale = Math.min(1, MAX_SHOT / Math.max(src.width, src.height));
+  const out = document.createElement("canvas");
+  out.width = src.width * scale;
+  out.height = src.height * scale;
+  const ctx = out.getContext("2d");
+  ctx.fillStyle = getComputedStyle(document.body).backgroundColor;
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(src, 0, 0, out.width, out.height);
+  const k = out.width / stage.clientWidth;
+  drawInk(ctx, k);
+  for (const r of refs) {
+    const s = project(r.point);
+    ctx.fillStyle = "#e8590c";
+    ctx.beginPath();
+    ctx.arc(s.x * k, s.y * k, 11 * k, 0, 7);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.font = `600 ${12 * k}px system-ui`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(String(r.n), s.x * k, s.y * k);
+  }
+  return out.toDataURL("image/png");
+}
+
+// --- Design panel: parts, feature history, source, checks -------------------
+function row(label, dim, current, onclick) {
+  const b = document.createElement("button");
+  b.className = "row";
+  if (current) b.setAttribute("aria-current", "true");
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = label;
+  const d = document.createElement("span");
+  d.className = "dim spacer";
+  d.textContent = dim;
+  b.append(name, d);
+  b.onclick = onclick;
+  return b;
+}
+function renderDesign() {
+  if (!model) return;
+  if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
+  $("parts").replaceChildren(...model.parts.map((p) =>
+    row(p.path || p.type, p.type, selectedPart === p.path, () => {
+      selectedPart = selectedPart === p.path ? null : p.path;
+      setPreview(null);
+      renderDesign();
+    }),
+  ));
+  const part = selectedPart !== null ? parts.get(selectedPart) : null;
+  const steps = $("steps");
+  steps.hidden = !part;
+  if (part) {
+    steps.replaceChildren(...spine(part.info.steps).map((s) =>
+      row(stepLabel(s, part.info.steps), s.op, previewStep === s.id, () => {
+        setPreview(previewStep === s.id ? null : s.id);
+        showSource(s.src);
+        renderDesign();
+      }),
+    ));
+  }
+  const checks = $("checks");
+  checks.hidden = model.checks.length === 0;
+  checks.replaceChildren(...model.checks.map((c) => {
+    const el = document.createElement("div");
+    el.className = `check ${c.pass ? "pass" : "fail"}`;
+    el.textContent = `${c.pass ? "✓" : "✗"} ${c.name}`;
+    return el;
+  }));
+}
+/** The body's own history: from the result back along each feature's first input. */
+function spine(steps) {
+  const byId = new Map(steps.map((s) => [s.id, s]));
+  const out = [];
+  for (let s = steps.at(-1); s; s = byId.get(s.inputs[0])) {
+    if (!isTransform(s) || isNamed(s)) out.unshift(s);
+  }
+  return out;
+}
+const isTransform = (s) => ["translate", "rotate", "mirror"].includes(s.op);
+const isNamed = (s) => !/^[a-z]+\d+$/.test(s.name) || !s.name.startsWith(s.op);
+/** "cut pocket, mount[0], ..." reads better than "cut1". */
+function stepLabel(s, steps) {
+  if (isNamed(s) && !["union", "cut", "intersect"].includes(s.op)) return s.name;
+  const byId = new Map(steps.map((x) => [x.id, x]));
+  const root = (x) => (isTransform(x) && !isNamed(x) ? root(byId.get(x.inputs[0])) : x.name);
+  const tools = s.inputs.slice(1).map((id) => root(byId.get(id)));
+  return tools.length ? tools.join(", ") : s.name;
+}
+/** Shows the part as it was at one step of its feature history. */
+function setPreview(id) {
+  previewStep = id;
+  if (previewObject) {
+    world.remove(previewObject);
+    disposeTree(previewObject);
+    previewObject = null;
+  }
+  for (const [path, p] of parts) {
+    const on = id === null;
+    p.mesh.visible = on;
+    p.edges.visible = on;
+    p.mesh.material = partMaterial;
+    if (!on && path !== selectedPart) {
+      p.mesh.visible = true;
+      p.mesh.material = ghostMaterial;
+    }
+  }
+  if (id === null) return;
+  const data = stepMeshes[id];
+  if (!data) return;
+  const g = geometryOf(data);
+  previewObject = new THREE.Group();
+  previewObject.add(new THREE.Mesh(g, partMaterial), new THREE.LineSegments(new THREE.EdgesGeometry(g, 28), edgeMaterial));
+  world.add(previewObject);
+}
+async function showSource(src) {
+  const box = $("source");
+  const res = await fetch(`/source?file=${encodeURIComponent(src.file)}`);
+  if (!res.ok) {
+    box.hidden = true;
+    return;
+  }
+  const { lines } = await res.json();
+  const from = Math.max(0, src.line - 4), to = Math.min(lines.length, src.line + 3);
+  const file = document.createElement("div");
+  file.className = "file";
+  file.textContent = `${src.file}:${src.line}`;
+  box.replaceChildren(file, ...lines.slice(from, to).map((text, i) => {
+    const l = document.createElement("div");
+    l.className = `line${from + i + 1 === src.line ? " at" : ""}`;
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = from + i + 1;
+    const code = document.createElement("span");
+    code.textContent = text;
+    l.append(num, code);
+    return l;
+  }));
+  box.hidden = false;
+}
+
+// --- Conversation -----------------------------------------------------------
+function addMessage(m) {
+  const log = $("log");
+  const el = document.createElement("div");
+  el.className = `msg ${m.role === "user" ? "user" : m.kind}`;
+  el.textContent = m.text;
+  if (m.kind === "tool") el.title = m.text;
+  log.append(el);
+  log.scrollTop = log.scrollHeight;
+}
+function setRunning(on, queued = 0) {
+  running = on;
+  updateSend();
+  const q = $("queued");
+  q.hidden = queued === 0;
+  q.textContent = `${queued} waiting for the agent`;
+  $("new-session").disabled = on;
+}
+function updateSend() {
+  const send = $("send");
+  const stop = running && !input.value.trim();
+  send.className = `icon ${stop ? "danger" : "primary"}`;
+  send.setAttribute("aria-label", stop ? "Stop agent" : "Send");
+  send.title = stop ? "Stop agent" : "Send";
+  send.querySelector("use").setAttribute("href", stop ? "#i-stop" : "#i-send");
+  send.dataset.stop = stop ? "1" : "";
+}
+function insertToken(n) {
+  if (listening) {
+    speechTokens.push({ n, at: speechText().length });
+    renderSpeech();
+    return;
+  }
+  const v = input.value;
+  input.value = `${v}${v && !v.endsWith(" ") ? " " : ""}[${n}] `;
+  updateSend();
+}
+function payload() {
+  const out = [];
+  for (const r of refs) {
+    if (r.stroke) {
+      for (const f of r.faces) out.push({ n: r.n, part: f.part, face: f.face, point: f.point.toArray() });
+    } else out.push({ n: r.n, part: r.part, face: r.face, point: r.point.toArray() });
+  }
+  return out;
+}
+async function send() {
+  const text = input.value.trim();
+  if (!text) return;
+  const body = { text, refs: payload(), screenshot: screenshot() };
+  input.value = "";
+  clearRefs();
+  updateSend();
+  const res = await fetch("/feedback", { method: "POST", body: JSON.stringify(body) });
+  if (!res.ok) {
+    input.value = text;
+    addMessage({ role: "agent", kind: "error", text: "Sending failed because the preview server did not accept it. Check that vibecad dev is running, then send again." });
+    updateSend();
+  }
+}
+$("composer").addEventListener("submit", (e) => {
+  e.preventDefault();
+  if ($("send").dataset.stop) fetch("/stop", { method: "POST" });
+  else send();
+});
+input.addEventListener("input", updateSend);
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    send();
+  }
+});
+$("draw").onclick = () => setDraw(!drawMode);
+$("fit").onclick = fit;
+$("new-session").onclick = () => fetch("/session/new", { method: "POST" });
+
+// --- Voice: pins made while talking land where they were said ---------------
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+let listening = false;
+let speechBase = "";
+let speechFinal = "";
+let speechInterim = "";
+let speechTokens = [];
+function speechText() {
+  return speechFinal + speechInterim;
+}
+function renderSpeech() {
+  const text = speechText();
+  let out = "", at = 0;
+  for (const t of [...speechTokens].sort((a, b) => a.at - b.at)) {
+    const cut = Math.min(t.at, text.length);
+    out += `${text.slice(at, cut)} [${t.n}] `;
+    at = cut;
+  }
+  out += text.slice(at);
+  input.value = (speechBase + out).replace(/ {2,}/g, " ").trimStart();
+  updateSend();
+}
+function setMic(on) {
+  const mic = $("mic");
+  mic.className = `icon${on ? " danger" : ""}`;
+  mic.querySelector("use").setAttribute("href", on ? "#i-stop" : "#i-mic");
+  mic.setAttribute("aria-label", on ? "Stop talking and send" : "Talk (hold Space)");
+  mic.title = mic.getAttribute("aria-label");
+  $("composer").classList.toggle("listening", on);
+}
+function startListening() {
+  if (listening) return;
+  const err = $("mic-error");
+  err.hidden = true;
+  if (!Recognition) {
+    err.textContent = "This browser has no speech recognition. Use Chrome or Safari, or type instead.";
+    err.hidden = false;
+    return;
+  }
+  recognizer = new Recognition();
+  recognizer.lang = navigator.language;
+  recognizer.continuous = true;
+  recognizer.interimResults = true;
+  speechBase = input.value;
+  speechFinal = speechInterim = "";
+  speechTokens = [];
+  listening = true;
+  setMic(true);
+  recognizer.onresult = (e) => {
+    speechInterim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) speechFinal += e.results[i][0].transcript;
+      else speechInterim += e.results[i][0].transcript;
+    }
+    renderSpeech();
+  };
+  recognizer.onerror = (e) => {
+    if (e.error === "no-speech" || e.error === "aborted") return;
+    err.textContent = e.error === "not-allowed"
+      ? "Voice input failed because microphone access is blocked. Allow it in the browser, then try again."
+      : `Voice input failed (${e.error}). Try again, or type instead.`;
+    err.hidden = false;
+  };
+  recognizer.onend = () => {
+    listening = false;
+    setMic(false);
+    send();
+  };
+  recognizer.start();
+}
+function stopListening() {
+  if (listening) recognizer.stop();
+}
+$("mic").onclick = () => (listening ? stopListening() : startListening());
+
+// --- Keyboard ---------------------------------------------------------------
+const typing = () => document.activeElement === input;
+addEventListener("keydown", (e) => {
+  if (typing()) {
+    if (e.key === "Escape") input.blur();
+    return;
+  }
+  if (e.code === "Space") {
+    e.preventDefault();
+    if (!e.repeat) startListening();
+  } else if (e.key === "d" || e.key === "D") setDraw(!drawMode);
+  else if (e.key === "f" || e.key === "F") fit();
+  else if (e.key === "Escape") {
+    clearRefs();
+    input.value = "";
+    updateSend();
+    setDraw(false);
+  }
+});
+addEventListener("keyup", (e) => {
+  if (e.code === "Space" && !typing()) stopListening();
+});
+
+// --- Server events ----------------------------------------------------------
+function showBanner(error) {
+  const b = $("banner");
+  b.hidden = !error;
+  if (!error) return;
+  const msg = document.createElement("div");
+  msg.textContent = error.hint ? `${error.message}. ${error.hint}` : error.message;
+  b.replaceChildren(msg);
+  if (error.src) {
+    const w = document.createElement("div");
+    w.className = "where";
+    w.textContent = `${error.src.file}:${error.src.line}`;
+    b.append(w);
+  }
+}
+const events = new EventSource("/events");
+events.onmessage = (ev) => {
+  const e = JSON.parse(ev.data);
+  if (e.type === "hello") {
+    $("log").replaceChildren();
+    e.log.forEach(addMessage);
+    setRunning(e.running, e.queued);
+    showBanner(e.buildError);
+    if (e.version > 0) loadModel();
+  } else if (e.type === "build") {
+    showBanner(e.ok ? null : e.error);
+    if (e.ok) loadModel();
+  } else if (e.type === "message") {
+    addMessage(e);
+  } else if (e.type === "status") {
+    setRunning(e.running, e.queued);
+  } else if (e.type === "reset") {
+    $("log").replaceChildren();
+  } else if (e.type === "show") {
+    const part = parts.get(e.part);
+    if (!part) return;
+    const faces = e.face ? part.info.faces.filter((f) => f.id === e.face || f.name === e.face) : part.info.faces;
+    for (const f of faces) flashOverlays.push(overlayFor(e.part, f.id, flashMaterial));
+    if (faces.length) flashUntil = performance.now() + 4000;
+  }
+};
+window.vibecad = { parts: () => parts, refs, camera, controls };
+dark.addEventListener("change", () => {
+  edgeMaterial.color.set(dark.matches ? 0x0d0e10 : 0x24262b);
+});
+edgeMaterial.color.set(dark.matches ? 0x0d0e10 : 0x24262b);
+resize();

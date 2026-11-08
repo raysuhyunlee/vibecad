@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>vibecad</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/viewer/style.css">
+  <script type="importmap">
+    {"imports": {
+      "three": "/vendor/three/build/three.module.js",
+      "three/addons/": "/vendor/three/examples/jsm/"
+    }}
+  </script>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></symbol>
+      <symbol id="i-pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></symbol>
+      <symbol id="i-fit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
+    </defs>
+  </svg>
+
+  <div id="app">
+    <aside id="design" aria-label="Design">
+      <section id="parts"></section>
+      <section id="steps" hidden></section>
+      <section id="source" hidden></section>
+      <section id="checks" hidden></section>
+    </aside>
+
+    <main id="stage">
+      <div id="viewport"></div>
+      <canvas id="ink"></canvas>
+      <div id="pins"></div>
+      <div id="tip" hidden></div>
+      <div id="banner" role="alert" hidden></div>
+      <div id="tools">
+        <button id="draw" class="icon" aria-label="Draw (D)" aria-pressed="false" title="Draw (D)"><svg><use href="#i-pen"/></svg></button>
+        <button id="fit" class="icon" aria-label="Fit view (F)" title="Fit view (F)"><svg><use href="#i-fit"/></svg></button>
+      </div>
+    </main>
+
+    <aside id="chat" aria-label="Conversation">
+      <header>
+        <button id="new-session" class="icon" aria-label="New session" title="New session"><svg><use href="#i-plus"/></svg></button>
+      </header>
+      <div id="log" aria-live="polite"></div>
+      <form id="composer">
+        <div id="refs"></div>
+        <div id="queued" hidden></div>
+        <textarea id="input" rows="2" placeholder="Click the model, then describe the change" aria-label="Feedback"></textarea>
+        <div id="actions">
+          <button id="mic" type="button" class="icon" aria-label="Talk (hold Space)" title="Talk (hold Space)"><svg><use href="#i-mic"/></svg></button>
+          <button id="send" type="submit" class="icon primary" aria-label="Send" title="Send"><svg><use href="#i-send"/></svg></button>
+        </div>
+        <div id="mic-error" role="alert" hidden></div>
+      </form>
+    </aside>
+  </div>
+  <script type="module" src="/viewer/main.js"></script>
+</body>
+</html>

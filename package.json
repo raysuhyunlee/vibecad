@@ -1,0 +1,29 @@
+{
+  "name": "vibecad",
+  "version": "0.1.0",
+  "description": "A CAD for agents, and a feedback system for humans",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "vibecad": "src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "occt-wasm": "5.16.0",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/three": "0.187.0",
+    "typescript": "7.0.2"
+  }
+}
