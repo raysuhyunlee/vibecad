@@ -37,8 +37,9 @@ Commands that build also take --pose joint=value,other/joint=value.
   test [entry]                   Build and fail if a design check fails, including joint sweeps
   query [entry] [--part p] [--face id] [--clearance a,b]
                                  Inspect parts and faces or measure between parts
-  render [entry] [--part p] [--out file.png]
-                                 Write a multi-view PNG
+  render [entry] [--part p] [--out file.png] [--labels]
+                                 Write a multi-view PNG. --labels numbers each face
+                                 in all six views and iso, and prints what each number is
   export [entry] [--part p] --out file.step|file.stl
   diff <git-ref> [entry]         Compare the model with another revision
   dev                            Start the app; open a project and file inside it.
@@ -141,6 +142,7 @@ async function main() {
       "out-dir": { type: "string" },
       message: { type: "string" },
       pose: { type: "string" },
+      labels: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -206,10 +208,17 @@ async function main() {
       return;
     }
     case "render": {
-      const png = await k.toMultiviewPNG(await pick(out, o.part));
+      const shape = await pick(out, o.part);
       const file = o.out ?? `${OUT_DIR}/render.png`;
       ensureDir(resolve(file, ".."));
-      writeFileSync(file, png);
+      if (o.labels) {
+        const { renderLabeled } = await import("./render.ts");
+        const { png, labels, unseen } = await renderLabeled(k, shape, out, o.part);
+        writeFileSync(file, png);
+        print({ ok: true, file, labels, unseen });
+        return;
+      }
+      writeFileSync(file, await k.toMultiviewPNG(shape));
       print({ ok: true, file });
       return;
     }

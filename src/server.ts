@@ -285,7 +285,7 @@ export async function serve(o: {
       ? `You are editing a vibecad model from a person's live feedback. Each message names the entry file they are viewing. ` +
         `Read AGENTS.md if it exists. Change the TypeScript source, never generated files. ` +
         `The preview rebuilds on every save. Verify with \`${cli} build <entry>\` and \`${cli} test <entry>\`. ` +
-        `Use \`${cli} render <entry>\` to see the result, and \`${cli} show --part P --face F --message M\` ` +
+        `Use \`${cli} render <entry>\` to see the result, add \`--labels\` to number each face and get its name, and use\`${cli} show --part P --face F --message M\` ` +
         `to point at geometry when you ask the person something. Commands that build take \`--pose joint=value,...\`. Reply in the person's language, briefly.\n\n`
       : "";
     const body = batch.map((f) => {

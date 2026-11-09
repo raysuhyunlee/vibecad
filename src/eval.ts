@@ -1,10 +1,10 @@
 // Evaluates the feature graph on OCCT and tracks every face back to its source.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { BooleanOp, OcctKernel, type EvolutionData, type ShapeHandle } from "occt-wasm";
+import { BooleanOp, JoinType, OcctKernel, type EvolutionData, type ShapeHandle } from "occt-wasm";
 import {
   EdgeSel, Instance, Solid,
-  type CheckDef, type JointDef, type MateDef, type PortDef, type PortRef, type Profile, type Query, type Src, type Vec3,
+  type CheckDef, type JointDef, type MateDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Src, type Vec3,
 } from "./lang.ts";
 
 const HASH_BOUND = 2147483647;
@@ -215,13 +215,14 @@ class Evaluator {
   /** Tags a swept profile through kernel history: each wall comes from one segment, so it takes that segment's name. */
   swept(n: Solid, p: Profile, caps: [string, string], sweep: (face: ShapeHandle) => EvolutionData): Evaluated {
     const k = this.k;
-    const face = this.face(p);
+    const sources = this.segmentEdges(p);
+    const face = this.face(n, p, sources);
     const ev = sweep(face);
     const tags = new Map<number, Tag>();
     const tag = (h: number, name: string) => tags.set(h, { name: `${n.name}.${name}`, src: n.src });
     for (const h of ev.firstShape) tag(h, caps[0]);
     for (const h of ev.lastShape) tag(h, caps[1]);
-    const segOf = new Map(k.getSubShapes(face, "edge").map((e) => [this.hash(e), this.segmentOf(e, p)]));
+    const segOf = new Map(k.getSubShapes(face, "edge").map((e) => [this.hash(e), this.segmentOf(e, sources)]));
     for (let i = 0; i < ev.edgeGenerated.length; ) {
       const seg = segOf.get(ev.edgeGenerated[i]!);
       const count = ev.edgeGenerated[i + 1]!;
@@ -234,15 +235,31 @@ class Evaluator {
     return { shape: ev.result, tags };
   }
 
-  /** The profile segment an edge of its face came from: the one whose midpoint lies on it. */
-  segmentOf(edge: ShapeHandle, p: Profile) {
+  /**
+   * The profile segment an edge of its face came from: the one nearest a point on the edge.
+   * An offset curve is the set of points at its distance from the nearest segment, so this also traces offsets.
+   */
+  segmentOf(edge: ShapeHandle, sources: ShapeHandle[]) {
+    const { points } = this.k.wireframe(edge, 0.05);
+    const count = points.length / 3;
+    // A line samples only its ends; anything else has a sample on the curve near its middle.
+    const at = count < 3
+      ? [0, 1, 2].map((i) => (points[i]! + points[3 + i]!) / 2)
+      : [0, 1, 2].map((i) => points[3 * (count >> 1) + i]!);
+    const probe = this.k.makeVertex(at[0]!, at[1]!, at[2]!);
     let best = 0, bestDistance = Infinity;
-    p.segments.forEach((s, i) => {
-      const mid = segmentMidpoint(s);
-      const d = this.k.distanceBetween(edge, this.k.makeVertex(mid[0], mid[1], 0));
+    sources.forEach((source, i) => {
+      const d = this.k.distanceBetween(source, probe);
       if (d < bestDistance) [best, bestDistance] = [i, d];
     });
     return best;
+  }
+
+  /** Moves a swept solid from the XY sketch onto its plane. */
+  onPlane(n: Solid, e: Evaluated, on: Plane | undefined): Evaluated {
+    if (!on) return e;
+    const placed = this.k.transformWithHistory(e.shape, frame(on.at, on.z, on.x), [...e.tags.keys()], HASH_BOUND);
+    return this.track(n, placed.result, placed, [e]);
   }
 
   hashes(inputs: Evaluated[]) {
@@ -277,11 +294,11 @@ class Evaluator {
       case "sphere":
         return this.primitive(n, k.makeSphere(a.radius));
       case "extrude":
-        return this.swept(n, a.profile, [a.height > 0 ? "bottom" : "top", a.height > 0 ? "top" : "bottom"], (f) =>
-          k.extrudeWithHistory(f, 0, 0, a.height, [], HASH_BOUND));
+        return this.onPlane(n, this.swept(n, a.profile, [a.height > 0 ? "bottom" : "top", a.height > 0 ? "top" : "bottom"], (f) =>
+          k.extrudeWithHistory(f, 0, 0, a.height, [], HASH_BOUND)), a.on);
       case "revolve":
-        return this.swept(n, a.profile, ["start", "end"], (f) =>
-          k.revolveWithHistory(f, { point: vec([0, 0, 0]), direction: vec(a.axis) }, a.degrees * DEG, [], HASH_BOUND));
+        return this.onPlane(n, this.swept(n, a.profile, ["start", "end"], (f) =>
+          k.revolveWithHistory(f, { point: vec([0, 0, 0]), direction: vec(a.axis) }, a.degrees * DEG, [], HASH_BOUND)), a.on);
       case "importStep": {
         if (!existsSync(a.path)) {
           throw new CadError("STEP_NOT_FOUND", `No STEP file at ${a.path}`, n.src, "The path is relative to the source file that calls importStep.");
@@ -408,14 +425,35 @@ class Evaluator {
     return k.isValid(ev.result) ? ev : undefined;
   }
 
-  face(p: Profile) {
+  /** One edge per profile segment, in order. */
+  segmentEdges(p: Profile) {
     const k = this.k;
-    const edges = p.segments.map((s) => {
-      if (s.t === "line") return k.makeLineEdge(vec([...s.a, 0]), vec([...s.b, 0]));
-      if (s.t === "circle") return k.makeCircleEdge(vec([...s.c, 0]), vec([0, 0, 1]), s.r);
-      return k.makeCircleArc(vec([...s.c, 0]), vec([0, 0, 1]), s.r, s.a0, s.a1);
+    const on = (q: readonly number[]) => vec([q[0]!, q[1]!, 0]);
+    return p.segments.map((s) => {
+      if (s.t === "line") return k.makeLineEdge(on(s.a), on(s.b));
+      if (s.t === "circle") return k.makeCircleEdge(on(s.c), vec([0, 0, 1]), s.r);
+      if (s.t === "spline") return k.interpolatePointsWithTangents(s.through.map(on), on(s.start), on(s.end));
+      if (s.t === "closedSpline") return k.interpolatePoints(s.through.map(on), true);
+      return k.makeCircleArc(on(s.c), vec([0, 0, 1]), s.r, s.a0, s.a1);
     });
-    return k.makeFace(k.makeWire(edges));
+  }
+
+  face(n: Solid, p: Profile, edges: ShapeHandle[]) {
+    const k = this.k;
+    let wire = k.makeWire(edges);
+    for (const distance of p.offsets ?? []) {
+      const wires = k.getSubShapes(k.offsetWire2D(wire, distance, JoinType.Intersection), "wire");
+      if (wires.length !== 1 || wires[0] === undefined) {
+        throw new CadError(
+          "BAD_OFFSET",
+          `offset by ${distance} leaves ${wires.length} outlines, not 1`,
+          n.src,
+          "An inward offset can use up or split the outline. Use a smaller distance.",
+        );
+      }
+      wire = wires[0];
+    }
+    return k.makeFace(wire);
   }
 
   selectFaces(n: Solid, shape: ShapeHandle, e: Evaluated, names: string[]) {
@@ -469,12 +507,6 @@ class Evaluator {
       `Available faces: ${names.join(", ")}`,
     );
   }
-}
-
-function segmentMidpoint(s: Profile["segments"][number]): [number, number] {
-  if (s.t === "line") return [(s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2];
-  const angle = s.t === "arc" ? (s.a0 + s.a1) / 2 : 0;
-  return [s.c[0] + s.r * Math.cos(angle), s.c[1] + s.r * Math.sin(angle)];
 }
 
 /** "mount" matches "mount[2].side"; "mount[2]" and "mount[2].side" match themselves. */

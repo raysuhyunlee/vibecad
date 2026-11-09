@@ -33,8 +33,17 @@
 - an imported file has no feature names, so its faces are `<feature>.face[i]` in file order; replacing the file can renumber them, so prefer selecting the whole feature, `edges.of("motor").curve("circle")`
 - STEP files are tracked in git, because `diff` builds revisions from git; saving one in the project rebuilds
 - a STEP file is also an entry: every command and the app open it directly as one part named after the file, with no ports and no TypeScript source
-- profiles: `polygon rect circle roundedRect path`
-- `path(start)` builds a closed outline: `line(to) arc(center, to, ccw) forward(length) tangentArc(to) round(r) named(name) close()`
+- profiles: `polygon rect circle roundedRect path closedSpline offset`
+- `path(start)` builds a closed outline: `line(to) arc(center, to, ccw) forward(length) tangentArc(to) spline(through, { start, end }) tangentSpline(through, end) round(r) named(name) close()`
+- a spline passes through its points as one curve; an end with no given tangent takes the direction of a parabola through the nearest three points, and a spline to one point needs both tangents
+- `round` cannot touch a spline; put a line or arc between them
+- `closedSpline(points)` is a smooth closed outline with no seam, and one wall, `side`
+- `offset(profile, distance)` moves an outline outward, or inward when negative, whichever way it was drawn; corners stay sharp, and offsets chain
+- an offset wall keeps the name of its nearest segment; the kernel can split an offset spline, so its wall gets `~2` and so on
+- an offset that leaves anything but one outline is `BAD_OFFSET`
+- sketch planes: `plane(at, z, x)`; `extrude(profile, height, on)` and `revolve(profile, axis, degrees, on)` sketch on it and sweep along its +z, or turn about the sketch's own axis
+- a plane's sketch y is z cross x; without x, the sketch's x is world X projected onto the plane, or world Y when z is near X
+- face names are the same on any plane; a plane is given by numbers, not picked from another solid's face
 - `round(r)` rounds the corner at the current point, against lines or arcs; to round the start, end on it with an explicit `line(start)`
 - bad geometry stops at the call: an arc end off its circle, a round that does not fit or has no corner
 - `outerTangent(c1, r1, c2, r2, side)` gives the touch points of a line tangent to two circles
@@ -58,6 +67,9 @@
 
 - `build test query render export diff dev show`, see `vibecad --help`
 - `--pose joint=value,...` sets joint values for any command that builds, except `diff` and `dev`
+- `render --labels` draws all six views and iso with a number on each face, and prints each number's part, face id and views, plus the faces no view can see
+- each face is tagged in the view that shows it best, moved aside with a leader line when crowded, and in other views where its tag fits
+- the PNG holds only numbers because the kernel's bitmap font lacks many letters; it reads the kernel package's layout and font files, so a kernel upgrade must recheck this
 
 ## settings
 
@@ -109,13 +121,13 @@
 
 ## status
 
-- modeling priority, draft: (1) sketches on any plane; (2) sketch offset; (3) spline; (4) constraint solver
+- modeling priority, draft: constraint solver is next
+- wip: sketching on a selected face
 - wip: fillet runout on curved walls or convex edges
 - wip: closed-loop linkages and more joint kinds (cylindrical, ball, planar)
 - wip: drawn strokes stay in place when a joint moves; pins follow their part
 - wip: sketch constraint solver, sweep, loft, draft, drawings, sheet metal
 - wip: per-feature build cache
-- wip: face labels in `vibecad render`
 - wip: isolating the agent from the person's global settings
 - wip: npm distribution. Node will not strip types under `node_modules`, so vibecad runs from this repo today; a release needs compiled output
 - wip: local speech recognition. Chrome's Web Speech sends audio to a cloud service
@@ -135,3 +147,4 @@
 - 2026-11-09: add the path builder; walls take their segment's name through kernel history
 - 2026-11-09: fill refused fillets on straight concave edges between flat faces
 - 2026-11-09: builds stop with the app and fail when their working directory is gone
+- 2026-11-09: add sketch planes, sketch offset and splines; add face labels to `render`

@@ -5,11 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  assembly, box, check, cylinder, edges, extrude, importStep, mate, minClearance, noCollision, outerTangent, part, path, polygon, port,
-  revolute, revolve, roundedRect, slider,
+  assembly, box, check, circle, closedSpline, cylinder, edges, extrude, importStep, mate, minClearance, noCollision, offset, outerTangent, part, path,
+  plane, polygon, port, rect, revolute, revolve, roundedRect, slider,
 } from "../src/index.ts";
 import { build, CadError, getKernel } from "../src/eval.ts";
 import type { Vec3 } from "../src/lang.ts";
+import { renderLabeled } from "../src/render.ts";
 
 const plate = part("Plate", (p: { hole?: number }) =>
   box(40, 20, 5).named("base").cut(cylinder(p.hole ?? 2, 10).named("bore").translate(0, 0, -1)),
@@ -21,7 +22,7 @@ test("faces keep their names through booleans, and point at source", async () =>
   const bore = faces.find((f) => f.id === "bore.side");
   assert.equal(bore?.surface, "cylinder");
   assert.match(bore!.src.file, /core\.test\.ts$/);
-  assert.equal(bore!.src.line, 15);
+  assert.equal(bore!.src.line, 16);
   assert.ok(faces.find((f) => f.id === "base.top"));
   assert.equal(new Set(faces.map((f) => f.id)).size, faces.length);
 });
@@ -208,6 +209,163 @@ test("creating a folder fails, not spins, when the working directory is gone", (
     try { ensureDir(".vibecad/preview"); console.log("created"); } catch (e) { console.log(e.code); }`;
   const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], { cwd: dir, encoding: "utf8", timeout: 20_000 });
   assert.match(out, /NO_WORKING_DIR|ENOENT/);
+});
+
+test("a sketch on a plane sweeps along its normal, keeping sketch axes and face names", async () => {
+  // A 10 by 4 rectangle on a plane through x = 5 facing +X, with the sketch's x along world Y.
+  const on = plane([5, 0, 0], "x", "y");
+  const m = await facesOf(extrude(rect(10, 4), 3, on).named("p"));
+  assert.deepEqual(m.bbox.min, [5, -5, -2]);
+  assert.deepEqual(m.bbox.max, [8, 5, 2]);
+  closeTo(m.faces.find((f) => f.id === "p.bottom")!.center[0], 5);
+  closeTo(m.faces.find((f) => f.id === "p.top")!.center[0], 8);
+  // side[0] is the sketch's -y edge, and the sketch's y is z cross x, here world Z.
+  closeTo(m.faces.find((f) => f.id === "p.side[0]")!.center[2], -2);
+
+  const tilted = await facesOf(extrude(circle(2), 10, plane([1, 2, 3], [1, 1, 0])).named("c"));
+  closeTo(tilted.volume, Math.PI * 4 * 10);
+  const end = 10 / Math.SQRT2;
+  tilted.faces.find((f) => f.id === "c.top")!.center.forEach((v, i) => closeTo(v, [1 + end, 2 + end, 3][i]!));
+});
+
+test("a revolve on a plane turns about the sketch's axis", async () => {
+  const ring = polygon([[5, 0], [7, 0], [7, 2], [5, 2]]);
+  const m = await facesOf(revolve(ring, "y", 360, plane([0, 0, 10], "x", "y")).named("r"));
+  // The sketch's y axis is world Z here, so the ring turns about Z and stays 2 tall, starting at the plane.
+  closeTo(m.bbox.size[2], 2);
+  closeTo(m.bbox.min[2], 10);
+  closeTo(m.bbox.size[0], 14);
+});
+
+test("a bad plane stops at the call", () => {
+  assert.throws(() => plane([0, 0, 0], [0, 0, 0]), /no direction/);
+  assert.throws(() => plane([0, 0, 0], "z", [0, 0, 2]), /parallel/);
+});
+
+test("offset grows outward and shrinks inward whichever way the outline runs, keeping names and corners", async () => {
+  const points: Array<[number, number]> = [[0, 0], [10, 0], [10, 10], [0, 10]];
+  for (const pts of [points, [...points].reverse()]) {
+    const grown = await facesOf(extrude(offset(polygon(pts), 1), 1).named("p"));
+    closeTo(grown.volume, 144);
+    assert.equal(grown.faces.length, 6);
+    closeTo((await facesOf(extrude(offset(polygon(pts), -1), 1))).volume, 64);
+  }
+  const outline = path([0, 0]).line([20, 0]).named("floor").arc([20, 5], [20, 10]).named("nose").line([0, 10]).close();
+  const { faces, volume } = await facesOf(extrude(offset(outline, 2), 3).named("p"));
+  const at = (id: string) => faces.find((f) => f.id === id)!;
+  closeTo(at("p.floor").center[1], -2);
+  assert.equal(at("p.nose").surface, "cylinder");
+  assert.ok(at("p.nose").center[0] > 20);
+  closeTo(at("p.side[2]").center[1], 12);
+  assert.equal(at("p.side[3]").surface, "plane");
+  assert.ok(volume > 3 * 200);
+});
+
+test("offsets chain, make a wall with a cut, and refuse to use up or split an outline", async () => {
+  const twice = await facesOf(extrude(offset(offset(rect(10, 10), 1), 2), 1));
+  closeTo(twice.volume, 256);
+  const wall = extrude(roundedRect(30, 20, 4), 5).named("o").cut(extrude(offset(roundedRect(30, 20, 4), -2), 7).named("i").translate(0, 0, -1));
+  const out = await build(part("P", () => wall)());
+  assert.ok((await getKernel()).isValid([...out.shapes.values()][0]!));
+  const eats = (d: number, p = rect(10, 10)) => build(part("P", () => extrude(offset(p, d), 1))());
+  await assert.rejects(eats(-6), (e: CadError) => e.code === "BAD_OFFSET");
+  const dumbbell = polygon([[0, 0], [10, 0], [10, 4], [20, 4], [20, 0], [30, 0], [30, 10], [20, 10], [20, 6], [10, 6], [10, 10], [0, 10]]);
+  await assert.rejects(eats(-3, dumbbell), (e: CadError) => e.code === "BAD_OFFSET");
+  assert.throws(() => offset(rect(1, 1), 0), /non-zero/);
+});
+
+test("a spline passes through its points, names its wall, and hands its tangent to the next step", async () => {
+  const k = await getKernel();
+  const through: Array<[number, number]> = [[5, 3], [10, 2], [15, 6]];
+  const outline = path([0, 0]).spline(through).named("curve").forward(5).line([20, -5]).line([0, -5]).close();
+  const seg = outline.segments[0]!;
+  assert.equal(seg.t, "spline");
+  if (seg.t !== "spline") return;
+  // The line after the spline continues along its end tangent.
+  const line = outline.segments[1]!;
+  if (line.t !== "line") throw new Error("expected a line");
+  const d = [line.b[0] - line.a[0], line.b[1] - line.a[1]];
+  closeTo(d[0]! * seg.end[1] - d[1]! * seg.end[0], 0);
+
+  const out = await build(part("P", () => extrude(outline, 2).named("p"))());
+  const m = out.model.parts[0]!;
+  const curve = m.faces.find((f) => f.id === "p.curve")!;
+  assert.equal(curve.surface, "extrusion");
+  for (const [x, y] of through) {
+    const shape = [...out.shapes.values()][0]!;
+    closeTo(k.distanceBetween(shape, k.makeVertex(x, y, 1)), 0, 1e-5);
+  }
+  assert.ok(k.isValid([...out.shapes.values()][0]!));
+});
+
+test("a spline honors given tangents, and tangentSpline leaves the last segment smoothly", () => {
+  const given = path([0, 0]).spline([[10, 0]], { start: [0, 2], end: [0, -3] }).close().segments[0]!;
+  if (given.t !== "spline") throw new Error("expected a spline");
+  assert.deepEqual(given.start, [0, 1]);
+  assert.deepEqual(given.end, [0, -1]);
+  const smooth = path([0, 0]).line([5, 0]).tangentSpline([[8, 2], [12, 6]]).close().segments[1]!;
+  if (smooth.t !== "spline") throw new Error("expected a spline");
+  assert.deepEqual(smooth.start, [1, 0]);
+});
+
+test("a closed spline and its offset build a smooth solid with one named wall", async () => {
+  const blob = closedSpline([[10, 0], [0, 7], [-10, 0], [0, -7]]);
+  const m = await facesOf(extrude(blob, 2).named("b"));
+  assert.deepEqual(m.faces.map((f) => f.id).sort(), ["b.bottom", "b.side", "b.top"]);
+  const grown = await facesOf(extrude(offset(blob, 1), 2).named("b"));
+  assert.ok(grown.volume > m.volume);
+  assert.ok(grown.faces.every((f) => f.name.startsWith("b.")));
+});
+
+test("a spline reports bad input where it was written", () => {
+  assert.throws(() => path([0, 0]).spline([]), /needs a point/);
+  assert.throws(() => path([0, 0]).spline([[5, 5]]), /both tangents/);
+  assert.throws(() => path([0, 0]).spline([[5, 5], [5, 5]]), /repeats/);
+  assert.throws(() => path([0, 0]).spline([[5, 5]], { start: [0, 0], end: [1, 0] }), /no direction/);
+  assert.throws(() => path([0, 0]).line([5, 0]).round(1).spline([[8, 2], [9, 5]]).close(), /round cannot touch a spline/);
+  assert.throws(() => closedSpline([[0, 0], [1, 1]]), /at least 3/);
+});
+
+test("labels name each face once, say where it shows, and leave out enclosed faces", async () => {
+  const k = await getKernel();
+  const solid = box(20, 20, 20).named("b").cut(box(4, 4, 4).named("void").translate(0, 0, 8));
+  const out = await build(part("P", () => solid)());
+  const r = await renderLabeled(k, [...out.shapes.values()][0]!, out);
+  assert.deepEqual(r.labels.map((l) => l.face).sort(), ["b.back", "b.bottom", "b.front", "b.left", "b.right", "b.top"]);
+  assert.deepEqual(r.labels.map((l) => l.n), [1, 2, 3, 4, 5, 6]);
+  assert.equal(r.unseen.length, 6);
+  assert.ok(r.unseen.every((u) => u.face.startsWith("void.")));
+  const shown = (face: string) => r.labels.find((l) => l.face === face)!.views;
+  assert.deepEqual(shown("b.top"), ["top", "iso"]);
+  assert.deepEqual(shown("b.front"), ["front"]);
+  assert.deepEqual(shown("b.right"), ["right", "iso"]);
+});
+
+test("labels cover every part of an assembly, or just the one asked for", async () => {
+  const k = await getKernel();
+  const block = part("Block", () => ({ solid: box(10, 10, 10).named("b"), ports: { top: port([0, 0, 10]), bottom: port([0, 0, 0], [0, 0, -1]) } }));
+  const top = assembly("T", () => {
+    const a = block(), c = block();
+    return { parts: { a, c }, mates: [mate(a.port("top"), c.port("bottom"))] };
+  });
+  const out = await build(top());
+  const shape = k.makeCompound([...out.shapes.values()]);
+  const all = await renderLabeled(k, shape, out);
+  assert.ok(all.labels.some((l) => l.part === "a") && all.labels.some((l) => l.part === "c"));
+  // Where the blocks touch, each face is hidden by the other part.
+  assert.deepEqual(all.unseen.map((u) => u.part + ":" + u.face).sort(), ["a:b.top", "c:b.bottom"]);
+  const one = await renderLabeled(k, out.shapes.get("c")!, out, "c");
+  assert.ok(one.labels.every((l) => l.part === "c"));
+  assert.equal(one.labels.length, 6);
+  assert.deepEqual([...one.png.subarray(1, 4)].map((c) => String.fromCharCode(c)).join(""), "PNG");
+});
+
+test("the CLI prints the number of each labeled face", () => {
+  const args = ["src/cli.ts", "render", "examples/servo-bracket/main.cad.ts", "--labels", "--out", ".vibecad/out/test-labels.png"];
+  const out = JSON.parse(execFileSync(process.execPath, args, { stdio: ["ignore", "pipe", "ignore"] }).toString());
+  assert.equal(out.ok, true);
+  assert.ok(out.labels.length > 10);
+  assert.ok(out.labels.every((l: { n: number; face: string; part: string; views: string[] }) => l.n > 0 && l.face && l.part && l.views.length > 0));
 });
 
 test("mates place parts, nest through assemblies, and run checks", async () => {

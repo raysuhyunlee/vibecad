@@ -66,10 +66,36 @@ export type Segment = (
   | { t: "line"; a: Pt; b: Pt }
   | { t: "arc"; c: Pt; r: number; a0: number; a1: number }
   | { t: "circle"; c: Pt; r: number }
+  /** Passes through every point, with these unit tangents at its ends. */
+  | { t: "spline"; through: Pt[]; start: Pt; end: Pt }
+  | { t: "closedSpline"; through: Pt[] }
 ) & { name?: string };
-/** A closed 2D outline on the XY plane. */
+/** A closed 2D outline in its sketch plane's x and y. */
 export interface Profile {
   segments: Segment[];
+  /** Applied in order after the segments. See offset. */
+  offsets?: number[];
+}
+
+/** A smooth closed outline through the points, with no seam. Its wall is "side". */
+export function closedSpline(points: Pt[]): Profile {
+  if (points.length < 3) throw new Error(`closedSpline: needs at least 3 points, got ${points.length}`);
+  checkSteps(points, "closedSpline");
+  return { segments: [{ t: "closedSpline", through: points }] };
+}
+/**
+ * The outline moved outward by distance, or inward when it is negative, whichever way it was drawn.
+ * Corners stay sharp, and each wall keeps the name of the segment it came from.
+ */
+export function offset(profile: Profile, distance: number): Profile {
+  if (!Number.isFinite(distance) || distance === 0) throw new Error(`offset: distance must be a non-zero number, got ${distance}`);
+  return { ...profile, offsets: [...(profile.offsets ?? []), distance] };
+}
+function checkSteps(points: Pt[], where: string) {
+  points.forEach((p, i) => {
+    const prev = points[(i + points.length - 1) % points.length]!;
+    if (dist(prev, p) < TOL) throw new Error(`${where}: repeated point [${p}]`);
+  });
 }
 
 export function polygon(points: Pt[]): Profile {
@@ -102,7 +128,8 @@ export function roundedRect(w: number, h: number, r: number): Profile {
 // A path segment while building. An arc keeps its direction as a signed sweep.
 type PathLine = { t: "line"; a: Pt; b: Pt; name?: string };
 type PathArc = { t: "arc"; c: Pt; r: number; from: number; sweep: number; name?: string };
-type PathSeg = PathLine | PathArc;
+type PathSpline = { t: "spline"; through: Pt[]; start: Pt; end: Pt; name?: string };
+type PathSeg = PathLine | PathArc | PathSpline;
 type Round = { r: number; name?: string };
 
 const TOL = 1e-7; // OCCT's own wire tolerance, mm
@@ -114,11 +141,13 @@ const onCircle = (c: Pt, r: number, angle: number): Pt => [c[0] + r * Math.cos(a
 const angleOf = (c: Pt, p: Pt) => Math.atan2(p[1] - c[1], p[0] - c[0]);
 
 function segPoint(s: PathSeg, t: number): Pt {
+  if (s.t === "spline") return t < 0.5 ? s.through[0]! : s.through.at(-1)!;
   if (s.t === "line") return [s.a[0] + (s.b[0] - s.a[0]) * t, s.a[1] + (s.b[1] - s.a[1]) * t];
   return onCircle(s.c, s.r, s.from + s.sweep * t);
 }
 /** Unit travel direction at parameter t. */
 function segDir(s: PathSeg, t: number): Pt {
+  if (s.t === "spline") return t < 0.5 ? s.start : s.end;
   if (s.t === "line") {
     const l = dist(s.a, s.b);
     return [(s.b[0] - s.a[0]) / l, (s.b[1] - s.a[1]) / l];
@@ -127,7 +156,7 @@ function segDir(s: PathSeg, t: number): Pt {
   return [-sign * Math.sin(angle), sign * Math.cos(angle)];
 }
 /** The parameter of the point on s nearest q, or undefined when it falls outside s. */
-function segParam(s: PathSeg, q: Pt): number | undefined {
+function segParam(s: PathLine | PathArc, q: Pt): number | undefined {
   let t: number;
   if (s.t === "line") {
     const l = dist(s.a, s.b), d = segDir(s, 0);
@@ -146,7 +175,7 @@ function segParam(s: PathSeg, q: Pt): number | undefined {
 type Curve = { p: Pt; d: Pt } | { c: Pt; r: number };
 
 /** The curve r away from s, on its left (side 1) or right (side -1). */
-function offsetCurve(s: PathSeg, r: number, side: number): Curve | undefined {
+function offsetCurve(s: PathLine | PathArc, r: number, side: number): Curve | undefined {
   if (s.t === "line") {
     const d = segDir(s, 0);
     return { p: [s.a[0] - d[1] * r * side, s.a[1] + d[0] * r * side], d };
@@ -180,7 +209,22 @@ function intersect(a: Curve, b: Curve): Pt[] {
   return [[m[0] - uy * h, m[1] + ux * h], [m[0] + uy * h, m[1] - ux * h]];
 }
 
-/** Builds a closed outline from lines and arcs. Each step continues from the last point. */
+/** The unit direction at p0 of the parabola through p0, p1 and p2, spaced by their distances. */
+function endTangent(p0: Pt, p1: Pt, p2: Pt): Pt {
+  const h0 = dist(p0, p1), h1 = dist(p1, p2);
+  const v = [0, 1].map((i) => {
+    const near = (p1[i]! - p0[i]!) / h0, far = (p2[i]! - p1[i]!) / h1;
+    return (near * (2 * h0 + h1) - far * h0) / (h0 + h1);
+  }) as Pt;
+  return unit(v, "spline");
+}
+function unit(v: Pt, where: string): Pt {
+  const l = Math.hypot(v[0], v[1]);
+  if (l < 1e-12) throw new Error(`${where}: a tangent has no direction`);
+  return [v[0] / l, v[1] / l];
+}
+
+/** Builds a closed outline from lines, arcs and splines. Each step continues from the last point. */
 export class Path {
   readonly #start: Pt;
   readonly #segs: PathSeg[] = [];
@@ -239,6 +283,30 @@ export class Path {
     const signed = (v[0] ** 2 + v[1] ** 2) / (2 * across);
     return this.arc([this.#at[0] + n[0] * signed, this.#at[1] + n[1] * signed], to, signed > 0);
   }
+  /**
+   * A smooth curve through the points, ending at the last one. An end with no tangent takes the
+   * direction the nearby points suggest, so two points or fewer after the start need both tangents.
+   */
+  spline(through: Pt[], tangents: { start?: Pt; end?: Pt } = {}) {
+    const all = [this.#at, ...through];
+    if (through.length === 0) throw new Error("path: spline needs a point to go through");
+    for (let i = 1; i < all.length; i++) {
+      if (dist(all[i - 1]!, all[i]!) < TOL) throw new Error(`path: spline repeats the point [${all[i]}]`);
+    }
+    if (all.length < 3 && !(tangents.start && tangents.end)) {
+      throw new Error("path: a spline to one point needs both tangents; add a point, or use line");
+    }
+    const n = all.length - 1;
+    const start = tangents.start ? unit(tangents.start, "spline") : endTangent(all[0]!, all[1]!, all[2]!);
+    const backward = () => endTangent(all[n]!, all[n - 1]!, all[n - 2]!);
+    const end = tangents.end ? unit(tangents.end, "spline") : ((b) => [-b[0], -b[1]] as Pt)(backward());
+    return this.#push({ t: "spline", through: all, start, end }, all[n]!);
+  }
+  /** A spline starting tangent to the previous segment. */
+  tangentSpline(through: Pt[], end?: Pt) {
+    const start = this.#dir("tangentSpline");
+    return this.spline(through, end ? { start, end } : { start });
+  }
   /** Rounds the corner at the current point, between the previous and the next segment. */
   round(r: number) {
     if (this.#segs.length === 0) throw new Error("path: round needs a segment before it");
@@ -278,6 +346,9 @@ function resolveRounds(segs: PathSeg[], rounds: Map<number, Round>): Segment[] {
   for (const [at, round] of rounds) {
     const i = at % n, prevI = (i + n - 1) % n;
     const prev = segs[prevI]!, next = segs[i]!;
+    if (prev.t === "spline" || next.t === "spline") {
+      throw new Error(`path: round cannot touch a spline, at [${segPoint(next, 0)}]; put a line or arc between them`);
+    }
     const u = segDir(prev, 1), v = segDir(next, 0);
     const turn = u[0] * v[1] - u[1] * v[0];
     const corner = segPoint(next, 0);
@@ -303,6 +374,10 @@ function resolveRounds(segs: PathSeg[], rounds: Map<number, Round>): Segment[] {
   segs.forEach((s, i) => {
     const arc = arcs.get(i);
     if (arc) out.push(toSegment(arc));
+    if (s.t === "spline") {
+      out.push(s);
+      return;
+    }
     const t0 = starts[i]!, t1 = ends[i]!;
     if (t0 > t1 + 1e-9) throw new Error(`path: rounds overlap on the segment from [${segPoint(s, 0)}] to [${segPoint(s, 1)}]`);
     if (t1 - t0 < 1e-9) return; // Two rounds used up this segment.
@@ -422,13 +497,31 @@ export function cone(r1: number, r2: number, height: number): Solid {
 export function sphere(radius: number): Solid {
   return new Solid("sphere", { radius }, []);
 }
-/** Faces: top, bottom, and per profile segment its name or side[i]. Extrudes along +Z from z=0. */
-export function extrude(profile: Profile, height: number): Solid {
-  return new Solid("extrude", { profile, height }, []);
+/** A sketch plane. The sketch's x lies along x, its y along z cross x, and sweeps go along +z. */
+export interface Plane {
+  at: Vec3;
+  z: Vec3;
+  x?: Vec3;
 }
-/** Faces: start, end when not a full turn, and per profile segment its name or side[i]. */
-export function revolve(profile: Profile, axis: Axis = "y", degrees = 360): Solid {
-  return new Solid("revolve", { profile, axis: toVec(axis), degrees }, []);
+/** Without x, the sketch's x is world X projected onto the plane, or world Y when z is near X. */
+export function plane(at: Vec3, z: Axis | Vec3 = "z", x?: Axis | Vec3): Plane {
+  const zv = toVec(z), xv = x && toVec(x);
+  const length = (v: Vec3) => Math.hypot(...v);
+  if (length(zv) < TOL) throw new Error("plane: z has no direction");
+  if (xv) {
+    const c: Vec3 = [zv[1] * xv[2] - zv[2] * xv[1], zv[2] * xv[0] - zv[0] * xv[2], zv[0] * xv[1] - zv[1] * xv[0]];
+    if (length(c) < TOL * length(zv) * length(xv)) throw new Error(`plane: x [${xv}] must not be parallel to z [${zv}]`);
+  }
+  return xv ? { at, z: zv, x: xv } : { at, z: zv };
+}
+
+/** Faces: top, bottom, and per profile segment its name or side[i]. Extrudes along the plane's +z, by default world Z from z=0. */
+export function extrude(profile: Profile, height: number, on?: Plane): Solid {
+  return new Solid("extrude", { profile, height, on }, []);
+}
+/** Faces: start, end when not a full turn, and per profile segment its name or side[i]. The axis is in the sketch's own axes. */
+export function revolve(profile: Profile, axis: Axis = "y", degrees = 360, on?: Plane): Solid {
+  return new Solid("revolve", { profile, axis: toVec(axis), degrees, on }, []);
 }
 /** Loads a STEP file, relative to the calling source file. Faces: face[i], in file order. */
 export function importStep(file: string): Solid {
