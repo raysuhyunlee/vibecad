@@ -22,29 +22,46 @@
       <symbol id="i-pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></symbol>
       <symbol id="i-fit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></symbol>
+      <symbol id="i-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></symbol>
       <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
     </defs>
   </svg>
 
   <div id="app">
     <aside id="design" aria-label="Design">
-      <section id="parts"></section>
+      <section id="files" aria-label="Project files" hidden>
+        <header>
+          <span id="project-name" class="name"></span>
+          <button id="open-project" class="icon" aria-label="Open project" title="Open project"><svg><use href="#i-folder"/></svg></button>
+        </header>
+        <div id="tree"></div>
+      </section>
+      <section id="parts" hidden></section>
       <section id="steps" hidden></section>
       <section id="source" hidden></section>
       <section id="checks" hidden></section>
     </aside>
 
+    <div id="center">
+    <div id="tabs" role="tablist" aria-label="Open files" hidden></div>
     <main id="stage">
       <div id="viewport"></div>
       <canvas id="ink"></canvas>
       <div id="pins"></div>
       <div id="tip" hidden></div>
       <div id="banner" role="alert" hidden></div>
+      <div id="empty">
+        <button id="open-first" class="button primary"><svg><use href="#i-folder"/></svg>Open project</button>
+        <span id="empty-text" hidden></span>
+      </div>
       <div id="tools">
         <button id="draw" class="icon" aria-label="Draw (D)" aria-pressed="false" title="Draw (D)"><svg><use href="#i-pen"/></svg></button>
         <button id="fit" class="icon" aria-label="Fit view (F)" title="Fit view (F)"><svg><use href="#i-fit"/></svg></button>
       </div>
     </main>
+    </div>
 
     <aside id="chat" aria-label="Conversation">
       <header>
@@ -63,6 +80,18 @@
       </form>
     </aside>
   </div>
+  <dialog id="picker" aria-label="Open project">
+    <form id="picker-form">
+      <button id="picker-up" type="button" class="icon" aria-label="Parent folder" title="Parent folder"><svg><use href="#i-up"/></svg></button>
+      <input id="picker-path" aria-label="Folder path" spellcheck="false" autocomplete="off">
+      <button id="picker-close" type="button" class="icon" aria-label="Close" title="Close"><svg><use href="#i-x"/></svg></button>
+    </form>
+    <div id="picker-list"></div>
+    <footer>
+      <div id="picker-error" role="alert" hidden></div>
+      <button id="picker-open" type="button" class="button primary">Open</button>
+    </footer>
+  </dialog>
   <script type="module" src="/viewer/main.js"></script>
 </body>
 </html>

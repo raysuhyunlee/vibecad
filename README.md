@@ -8,12 +8,14 @@ Needs Node 24+. Feedback needs a logged-in `claude` or `codex` CLI.
 
 ```bash
 npm install
-node src/cli.ts dev examples/servo-bracket/main.ts   # open the printed URL
+node src/cli.ts dev   # open the printed URL
 ```
 
-Click a face, hold Space and talk, or type. `D` draws, `F` fits, `Esc` clears.
+Open a project folder in the app, for example `examples/servo-bracket`, and pick a file. Click a face, hold Space and talk, or type. `D` draws, `F` fits, `Esc` clears.
 
 ## A part
+
+Modeling files are named `*.cad.ts` and default-export what they show. A part with required params exports a preview, for example `export default () => Plate({ hole: 3 })`. Other `.ts` files are plain code.
 
 ```ts
 export const Plate = part("Plate", (p: { hole: number }) => ({

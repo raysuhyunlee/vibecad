@@ -1,8 +1,9 @@
 // The live preview server: rebuilds on save, and carries human feedback to the agent.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { dirname, extname, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AgentRunner, cliCommand } from "./agent.ts";
 import type { FaceInfo, Model } from "./eval.ts";
@@ -12,12 +13,25 @@ const CLI = resolve(HERE, "cli.ts");
 const VIEWER = resolve(HERE, "../viewer");
 const THREE_ROOT = resolve(dirname(fileURLToPath(import.meta.resolve("three"))), "..");
 const MAX_BODY = 32 * 1024 * 1024;
+const DEV_FILE = ".vibecad/dev.json";
+const PREVIEW_DIR = ".vibecad/preview"; // apart from the agent's own builds in .vibecad/out
+const MAX_FILES = 2000; // keeps an accidental open of a huge folder responsive
+const MAX_DIRS = 5000;
+const ENTRY_SUFFIX = ".cad.ts";
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
 };
 
+/** An open file. It keeps its last good build until it is closed. */
+interface Tab {
+  version: number;
+  stale: boolean; // source may have changed since the last build
+  model?: Model;
+  meshes?: string;
+  error?: unknown;
+}
 interface Ref {
   n: number;
   part: string;
@@ -26,7 +40,8 @@ interface Ref {
 }
 interface Feedback {
   text: string;
-  refs: Ref[];
+  entry: string;
+  refs: string[];
   screenshot?: string;
 }
 
@@ -36,8 +51,31 @@ function inside(root: string, child: string) {
   return rel !== "" && !rel.startsWith("..") && !rel.startsWith(sep) && resolve(root, rel) === child;
 }
 
+const hiddenName = (name: string) => name.startsWith(".") || name === "node_modules";
+const expandHome = (path: string) => path.replace(/^~(?=$|[\\/])/, homedir());
+
+/** The project's modeling files, breadth first, relative to the working directory. */
+function listFiles() {
+  const files: string[] = [];
+  const dirs = ["."];
+  let i = 0;
+  for (; i < dirs.length && i < MAX_DIRS && files.length < MAX_FILES; i++) {
+    const dir = dirs[i]!;
+    try {
+      for (const item of readdirSync(dir, { withFileTypes: true })) {
+        if (hiddenName(item.name)) continue;
+        const path = dir === "." ? item.name : `${dir}/${item.name}`;
+        if (item.isDirectory()) dirs.push(path);
+        else if (item.isFile() && path.endsWith(ENTRY_SUFFIX)) files.push(path);
+      }
+    } catch {
+      // An unreadable folder just stays out of the list.
+    }
+  }
+  return { files: files.sort((a, b) => a.localeCompare(b)), truncated: i < dirs.length };
+}
+
 export async function serve(o: {
-  entry: string;
   port: number;
   agent: string;
   model?: string;
@@ -47,8 +85,13 @@ export async function serve(o: {
   const clients = new Set<ServerResponse>();
   const log: unknown[] = [];
   const queue: Feedback[] = [];
-  let model: Model | undefined;
-  let buildError: unknown;
+  // The working directory is the open project's root, so builds, agents and
+  // `.vibecad/` all resolve against it. One app serves one project at a time.
+  let root: string | undefined;
+  let entry: string | undefined;
+  let project: ReturnType<typeof listFiles> = { files: [], truncated: false };
+  let watcher: FSWatcher | undefined;
+  const tabs = new Map<string, Tab>();
   let version = 0;
   let feedbackId = 0;
 
@@ -64,48 +107,140 @@ export async function serve(o: {
     emit({ type: "status", running: agent.running, queued: queue.length });
   };
 
+  const entryState = () => {
+    const tab = entry ? tabs.get(entry) : undefined;
+    return {
+      entry,
+      tabs: [...tabs].map(([file, t]) => ({ file, version: t.version, failed: !!t.error })),
+      built: !!tab?.model,
+      building: buildingFile,
+      buildError: tab?.error,
+    };
+  };
+  const hello = () => ({
+    type: "hello", root, name: root && basename(root), ...project, ...entryState(),
+    log, running: agent.running, queued: queue.length, agent: o.agent,
+  });
+
   // --- Builds ---------------------------------------------------------------
   let building: ChildProcess | undefined;
+  let buildingFile: string | undefined;
   let timer: NodeJS.Timeout | undefined;
   const runBuild = () => {
+    const file = entry;
+    if (!file) return;
     building?.kill();
-    const child = spawn(process.execPath, [CLI, "build", o.entry, "--steps"], { stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn(process.execPath, [CLI, "build", file, "--steps", "--out-dir", PREVIEW_DIR], { stdio: ["ignore", "pipe", "ignore"] });
     building = child;
+    buildingFile = file;
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.on("close", (_code, signal) => {
       if (signal || building !== child) return;
-      building = undefined;
+      building = buildingFile = undefined;
+      const tab = tabs.get(file);
+      if (!tab) return;
+      tab.stale = false;
       try {
         const r = JSON.parse(out);
         if (r.ok) {
-          model = JSON.parse(readFileSync(".vibecad/out/model.json", "utf8"));
-          buildError = undefined;
-          emit({ type: "build", ok: true, version: ++version });
-        } else {
-          buildError = r.error;
-          emit({ type: "build", ok: false, error: r.error });
-        }
+          tab.model = JSON.parse(readFileSync(`${PREVIEW_DIR}/model.json`, "utf8"));
+          tab.meshes = readFileSync(`${PREVIEW_DIR}/meshes.json`, "utf8");
+          tab.version = ++version;
+          tab.error = undefined;
+        } else tab.error = r.error;
       } catch {
-        buildError = { code: "BUILD_CRASHED", message: "The build process crashed. Run vibecad build for details." };
-        emit({ type: "build", ok: false, error: buildError });
+        tab.error = { code: "BUILD_CRASHED", message: "The build process crashed. Run vibecad build for details." };
       }
+      emit({ type: "entry", ...entryState() });
     });
   };
   const scheduleBuild = () => {
     clearTimeout(timer);
     timer = setTimeout(runBuild, 120);
   };
-  watch(".", { recursive: true }, (_event, file) => {
-    if (!file) return;
-    const top = file.split(/[\\/]/)[0];
-    if (top === "node_modules" || top === ".vibecad" || top === ".git") return;
-    if (file.endsWith(".ts")) scheduleBuild();
-  });
+
+  // --- Project --------------------------------------------------------------
+  /** Shows a tab, opening it if needed. Only a tab that may be out of date builds. */
+  const switchTo = (next: string | undefined) => {
+    clearTimeout(timer);
+    entry = next;
+    if (next && !tabs.has(next)) tabs.set(next, { version: 0, stale: true });
+    if (buildingFile === next) return;
+    building?.kill();
+    building = buildingFile = undefined;
+    if (next && tabs.get(next)!.stale) runBuild();
+  };
+  const setEntry = (next: string | undefined) => {
+    switchTo(next);
+    emit({ type: "entry", ...entryState() });
+  };
+  const closeTab = (file: string) => {
+    const open = [...tabs.keys()];
+    const i = open.indexOf(file);
+    if (i < 0) return;
+    tabs.delete(file);
+    setEntry(file === entry ? open[i + 1] ?? open[i - 1] : entry);
+  };
+  /** A project-relative `.ts` path that exists, or undefined. */
+  const projectFile = (file: unknown) => {
+    if (typeof file !== "string" || !root) return undefined;
+    const target = resolve(file);
+    if (!target.endsWith(".ts") || !inside(root, target) || !existsSync(target)) return undefined;
+    return relative(root, target).replaceAll(sep, "/");
+  };
+  const projectEntry = (file: unknown) => {
+    const path = projectFile(file);
+    return path?.endsWith(ENTRY_SUFFIX) ? path : undefined;
+  };
+  let filesTimer: NodeJS.Timeout | undefined;
+  const scheduleFiles = () => {
+    clearTimeout(filesTimer);
+    filesTimer = setTimeout(() => {
+      const next = listFiles();
+      if (JSON.stringify(next) !== JSON.stringify(project)) {
+        project = next;
+        emit({ type: "files", ...project });
+      }
+      for (const file of [...tabs.keys()]) if (!existsSync(file)) closeTab(file);
+    }, 200);
+  };
+  const openProject = (target: string, wanted: unknown, wantedTabs: unknown) => {
+    const previous = root;
+    process.chdir(target);
+    building?.kill();
+    building = buildingFile = undefined;
+    entry = undefined;
+    tabs.clear();
+    if (previous) rmSync(resolve(previous, DEV_FILE), { force: true });
+    root = process.cwd();
+    log.length = 0;
+    queue.length = 0;
+    mkdirSync(".vibecad", { recursive: true });
+    writeFileSync(".vibecad/.gitignore", "*\n");
+    writeFileSync(DEV_FILE, JSON.stringify({ port: o.port }));
+    project = listFiles();
+    watcher?.close();
+    watcher = watch(".", { recursive: true }, (_event, file) => {
+      if (!file || file.split(/[\\/]/).some(hiddenName)) return;
+      if (file.endsWith(".ts")) {
+        for (const tab of tabs.values()) tab.stale = true;
+        scheduleBuild();
+      }
+      if (file.endsWith(".ts") || !extname(file)) scheduleFiles();
+    });
+    watcher.on("error", () => {});
+    for (const file of Array.isArray(wantedTabs) ? wantedTabs : []) {
+      const path = projectEntry(file);
+      if (path) tabs.set(path, { version: 0, stale: true });
+    }
+    switchTo(projectEntry(wanted) ?? project.files.find((f) => f === `main${ENTRY_SUFFIX}`));
+    emit(hello());
+  };
 
   // --- Agent turns ----------------------------------------------------------
   const describeRef = (r: Ref) => {
-    const part = model?.parts.find((p) => p.path === r.part);
+    const part = (entry ? tabs.get(entry)?.model : undefined)?.parts.find((p) => p.path === r.part);
     const face: FaceInfo | undefined = part?.faces.find((f) => f.id === r.face);
     const src = face ? `${face.src.file}:${face.src.line}` : "unknown";
     const point = r.point ? ` point=[${r.point.map((v) => v.toFixed(2)).join(",")}]` : "";
@@ -114,15 +249,15 @@ export async function serve(o: {
   const prompt = (batch: Feedback[], fresh: boolean) => {
     const cli = cliCommand();
     const intro = fresh
-      ? `You are editing a vibecad model from a person's live feedback. The entry file is ${o.entry}. ` +
-        `Read AGENTS.md first. Change the TypeScript source, never generated files. ` +
-        `The preview rebuilds on every save. Verify with \`${cli} build ${o.entry}\` and \`${cli} test ${o.entry}\`. ` +
-        `Use \`${cli} render ${o.entry}\` to see the result, and \`${cli} show --part P --face F --message M\` ` +
+      ? `You are editing a vibecad model from a person's live feedback. Each message names the entry file they are viewing. ` +
+        `Read AGENTS.md if it exists. Change the TypeScript source, never generated files. ` +
+        `The preview rebuilds on every save. Verify with \`${cli} build <entry>\` and \`${cli} test <entry>\`. ` +
+        `Use \`${cli} render <entry>\` to see the result, and \`${cli} show --part P --face F --message M\` ` +
         `to point at geometry when you ask the person something. Reply in the person's language, briefly.\n\n`
       : "";
     const body = batch.map((f) => {
-      const lines = [`Person said: ${JSON.stringify(f.text)}`];
-      if (f.refs.length) lines.push("They pointed at (tokens like [1] in the text refer to these):", ...f.refs.map(describeRef));
+      const lines = [`Viewing: ${f.entry}`, `Person said: ${JSON.stringify(f.text)}`];
+      if (f.refs.length) lines.push("They pointed at (tokens like [1] in the text refer to these):", ...f.refs);
       if (f.screenshot) lines.push(`Screenshot of what they see: ${f.screenshot}`);
       return lines.join("\n");
     });
@@ -184,21 +319,34 @@ export async function serve(o: {
           res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
           clients.add(res);
           req.on("close", () => clients.delete(res));
-          res.write(`data: ${JSON.stringify({ type: "hello", version, buildError, log, running: agent.running, queued: queue.length, agent: o.agent })}\n\n`);
+          res.write(`data: ${JSON.stringify(hello())}\n\n`);
           return;
         }
         if (path === "/model") {
-          if (!existsSync(".vibecad/out/meshes.json") || !model) return json(res, { error: "No build yet" }, 404);
+          const tab = tabs.get(url.searchParams.get("file") ?? entry ?? "");
+          if (!tab?.model || !tab.meshes) return json(res, { error: "No build yet" }, 404);
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(`{"model":${JSON.stringify(model)},"meshes":${readFileSync(".vibecad/out/meshes.json", "utf8")}}`);
+          res.end(`{"version":${tab.version},"model":${JSON.stringify(tab.model)},"meshes":${tab.meshes}}`);
           return;
         }
         if (path === "/source") {
-          const target = resolve(url.searchParams.get("file") ?? "");
-          if (!target.endsWith(".ts") || !inside(process.cwd(), target) || !existsSync(target)) {
-            return json(res, { error: "Not found" }, 404);
-          }
+          const target = projectFile(url.searchParams.get("file"));
+          if (!target) return json(res, { error: "Not found" }, 404);
           return json(res, { lines: readFileSync(target, "utf8").split("\n") });
+        }
+        if (path === "/dirs") {
+          const asked = url.searchParams.get("path");
+          const target = resolve(asked ? expandHome(asked) : root ? dirname(root) : homedir());
+          try {
+            const dirs = readdirSync(target, { withFileTypes: true })
+              .filter((d) => !hiddenName(d.name) && (d.isDirectory() ||
+                (d.isSymbolicLink() && statSync(join(target, d.name), { throwIfNoEntry: false })?.isDirectory())))
+              .map((d) => d.name)
+              .sort((a, b) => a.localeCompare(b));
+            return json(res, { path: target, parent: dirname(target) === target ? null : dirname(target), dirs });
+          } catch {
+            return json(res, { error: `Cannot read ${target}. Check the path and its permissions.` }, 400);
+          }
         }
         if (path.startsWith("/viewer/")) {
           const target = resolve(VIEWER, path.slice(8));
@@ -212,7 +360,31 @@ export async function serve(o: {
       }
 
       if (req.method !== "POST") return json(res, { error: "Method not allowed" }, 405);
+      if (path === "/project") {
+        const b = JSON.parse(await readBody(req));
+        if (agent.running) return json(res, { error: "Stop the agent before opening another project." }, 409);
+        const target = resolve(expandHome(String(b.path ?? "")));
+        try {
+          if (!statSync(target).isDirectory()) throw new Error();
+          accessSync(target, constants.W_OK);
+        } catch {
+          return json(res, { error: `Cannot open ${target}. It must be a folder you can write to.` }, 400);
+        }
+        openProject(target, b.entry, b.tabs);
+        return json(res, { ok: true });
+      }
+      if (path === "/entry") {
+        const next = projectEntry(JSON.parse(await readBody(req)).file);
+        if (!next) return json(res, { error: "That file is no longer in the project." }, 400);
+        setEntry(next);
+        return json(res, { ok: true });
+      }
+      if (path === "/tab/close") {
+        closeTab(String(JSON.parse(await readBody(req)).file));
+        return json(res, { ok: true });
+      }
       if (path === "/feedback") {
+        if (!entry) return json(res, { error: "Open a file first" }, 409);
         const b = JSON.parse(await readBody(req));
         const text = String(b.text ?? "").trim();
         if (!text) return json(res, { error: "Feedback needs text" }, 400);
@@ -221,7 +393,8 @@ export async function serve(o: {
           ...(Array.isArray(r.point) && { point: r.point.map(Number) }),
         }));
         const id = ++feedbackId;
-        const feedback: Feedback = { text, refs };
+        // Described now: the model may be a different file by the time the turn starts.
+        const feedback: Feedback = { text, entry, refs: refs.map(describeRef) };
         if (typeof b.screenshot === "string" && b.screenshot.startsWith("data:image/png;base64,")) {
           mkdirSync(".vibecad/feedback", { recursive: true });
           feedback.screenshot = `.vibecad/feedback/${Date.now()}-${id}.png`;
@@ -240,6 +413,7 @@ export async function serve(o: {
         return json(res, { ok: true });
       }
       if (path === "/session/new") {
+        if (!root) return json(res, { error: "Open a project first" }, 409);
         if (agent.running) return json(res, { error: "Stop the agent first" }, 409);
         agent.newSession();
         log.length = 0;
@@ -266,10 +440,7 @@ export async function serve(o: {
     process.exit(1);
   });
   server.listen(o.port, "127.0.0.1", () => {
-    mkdirSync(".vibecad", { recursive: true });
-    writeFileSync(".vibecad/dev.json", JSON.stringify({ port: o.port }));
-    runBuild();
-    o.print({ ok: true, url: `http://127.0.0.1:${o.port}`, agent: o.agent, entry: o.entry });
+    o.print({ ok: true, url: `http://127.0.0.1:${o.port}`, agent: o.agent });
   });
   await new Promise(() => {});
 }

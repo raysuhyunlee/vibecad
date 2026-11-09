@@ -1,5 +1,5 @@
 import { box, cylinder, edges, extrude, part, port, roundedRect } from "vibecad";
-import { flangeHoles, type ServoMount } from "./servo.ts";
+import { flangeHoles, StandardServo, type ServoMount } from "./servo.cad.ts";
 
 export const ServoBracket = part(
   "ServoBracket",
@@ -60,3 +60,5 @@ export const ServoBracket = part(
     };
   },
 );
+
+export default () => ServoBracket({ servo: StandardServo });

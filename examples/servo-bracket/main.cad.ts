@@ -1,6 +1,6 @@
 import { assembly, box, check, mate, minClearance, noOverlap, part, port } from "vibecad";
-import { ServoBracket } from "./parts/bracket.ts";
-import { ServoBody, StandardServo } from "./parts/servo.ts";
+import { ServoBracket } from "./parts/bracket.cad.ts";
+import { ServoBody, StandardServo } from "./parts/servo.cad.ts";
 
 const BasePlate = part("BasePlate", (p: { width: number; depth: number; thickness: number }) => ({
   solid: box(p.width, p.depth, p.thickness).named("plate"),

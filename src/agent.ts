@@ -4,8 +4,10 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
 const SESSIONS_FILE = ".vibecad/sessions.json";
+const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
 
 export type AgentEvent =
   | { kind: "text"; text: string }
@@ -24,7 +26,7 @@ function short(input: unknown) {
 }
 
 export function cliCommand() {
-  return "node src/cli.ts";
+  return `node ${/\s/.test(CLI) ? JSON.stringify(CLI) : CLI}`;
 }
 
 const claude: Adapter = {

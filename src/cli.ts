@@ -2,11 +2,20 @@
 // Every command prints one JSON document to stdout, and exits non-zero on failure.
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { registerHooks } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { build, CadError, getKernel, type BuildOutput, type Model } from "./eval.ts";
 import { isInstance, type Instance } from "./lang.ts";
+
+// Projects anywhere on disk import the language as "vibecad".
+registerHooks({
+  resolve: (specifier, context, next) =>
+    specifier === "vibecad"
+      ? { url: new URL("./index.ts", import.meta.url).href, shortCircuit: true }
+      : next(specifier, context),
+});
 
 // The kernel prints transfer statistics to stdout. Keep stdout pure JSON.
 process.stdout.write = ((chunk: unknown) => {
@@ -17,9 +26,10 @@ process.stdout.write = ((chunk: unknown) => {
 
 const OUT_DIR = ".vibecad/out";
 const DEV_FILE = ".vibecad/dev.json";
-const USAGE = `vibecad <command> [entry=main.ts]
+const USAGE = `vibecad <command> [entry=main.cad.ts]
 
-  build [entry] [--steps]        Build; writes ${OUT_DIR}/model.json and meshes.json
+  build [entry] [--steps] [--out-dir dir]
+                                 Build; writes ${OUT_DIR}/model.json and meshes.json
   test [entry]                   Build and fail if a design check fails
   query [entry] [--part p] [--face id] [--clearance a,b]
                                  Inspect parts and faces or measure between parts
@@ -27,8 +37,8 @@ const USAGE = `vibecad <command> [entry=main.ts]
                                  Write a multi-view PNG
   export [entry] [--part p] --out file.step|file.stl
   diff <git-ref> [entry]         Compare the model with another revision
-  dev [entry] [--port n] [--agent claude|codex] [--model id]
-                                 Serve the live preview and the feedback loop
+  dev [--port n] [--agent claude|codex] [--model id]
+                                 Start the app; open a project and file inside it
   show --part p [--face id] [--message text]
                                  Point at geometry in the open preview`;
 
@@ -52,6 +62,8 @@ async function load(entry: string): Promise<Instance> {
     throw new CadError(
       "BAD_ENTRY",
       `${entry} must default-export a part or assembly instance, or a factory with default params`,
+      undefined,
+      "For a part with required params, export a preview: export default () => Part({ ... })",
     );
   }
   return value;
@@ -78,10 +90,10 @@ function summary(m: Model) {
   };
 }
 
-async function writeOutputs(out: BuildOutput) {
-  mkdirSync(OUT_DIR, { recursive: true });
-  writeFileSync(`${OUT_DIR}/model.json`, JSON.stringify(out.model, null, 2));
-  writeFileSync(`${OUT_DIR}/meshes.json`, JSON.stringify({
+async function writeOutputs(out: BuildOutput, dir: string) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(`${dir}/model.json`, JSON.stringify(out.model, null, 2));
+  writeFileSync(`${dir}/meshes.json`, JSON.stringify({
     parts: out.meshes.map(encodeMesh),
     steps: Object.fromEntries([...out.stepMeshes].map(([id, m]) => [id, encodeMesh(m)])),
   }));
@@ -107,6 +119,7 @@ async function main() {
       face: { type: "string" },
       clearance: { type: "string" },
       out: { type: "string" },
+      "out-dir": { type: "string" },
       port: { type: "string" },
       agent: { type: "string" },
       model: { type: "string" },
@@ -120,13 +133,14 @@ async function main() {
     return;
   }
 
-  if (cmd === "diff") return diff(rest[0], rest[1] ?? "main.ts");
+  if (cmd === "diff") return diff(rest[0], rest[1] ?? "main.cad.ts");
 
-  const entry = rest[0] ?? "main.ts";
+  const entry = rest[0] ?? "main.cad.ts";
   if (cmd === "dev") {
+    if (rest[0]) throw new CadError("DEV_TAKES_NO_FILE", "dev takes no file", undefined, "Run vibecad dev, then open the project in the app");
     const { serve } = await import("./server.ts");
     return serve({
-      entry, print,
+      print,
       port: Number(o.port ?? 4173),
       agent: o.agent ?? "claude",
       ...(o.model && { model: o.model }),
@@ -139,8 +153,9 @@ async function main() {
 
   switch (cmd) {
     case "build": {
-      await writeOutputs(out);
-      print({ ok: true, ...summary(out.model), artifacts: `${OUT_DIR}/model.json` });
+      const dir = o["out-dir"] ?? OUT_DIR;
+      await writeOutputs(out, dir);
+      print({ ok: true, ...summary(out.model), artifacts: `${dir}/model.json` });
       return;
     }
     case "test": {
@@ -193,7 +208,7 @@ async function main() {
 /** Asks the running preview to highlight geometry for the human. */
 async function show(part?: string, face?: string, message?: string) {
   if (!part) throw new CadError("MISSING_PART", "show needs --part");
-  if (!existsSync(DEV_FILE)) throw new CadError("NO_PREVIEW", "No preview is running. Start one with: vibecad dev");
+  if (!existsSync(DEV_FILE)) throw new CadError("NO_PREVIEW", "No preview has this project open. Run vibecad dev and open it in the app");
   const { port } = JSON.parse(readFileSync(DEV_FILE, "utf8"));
   const res = await fetch(`http://127.0.0.1:${port}/show`, {
     method: "POST",

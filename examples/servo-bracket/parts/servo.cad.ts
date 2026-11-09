@@ -40,3 +40,5 @@ export const ServoBody = part("ServoBody", (p: { mount: ServoMount; height?: num
     ports: { seat: port([0, 0, height - 8], [0, 0, -1]) },
   };
 });
+
+export default () => ServoBody({ mount: StandardServo });

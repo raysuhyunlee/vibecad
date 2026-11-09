@@ -81,7 +81,7 @@ test("an unconnected part is an error, not a part at the origin", async () => {
 
 test("the CLI builds deterministically across processes and prints pure JSON", () => {
   const run = () =>
-    JSON.parse(execFileSync(process.execPath, ["src/cli.ts", "build", "examples/servo-bracket/main.ts"], { stdio: ["ignore", "pipe", "ignore"] }).toString());
+    JSON.parse(execFileSync(process.execPath, ["src/cli.ts", "build", "examples/servo-bracket/main.cad.ts"], { stdio: ["ignore", "pipe", "ignore"] }).toString());
   const a = run(), b = run();
   assert.equal(a.ok, true);
   assert.equal(a.hash, b.hash);
@@ -91,7 +91,7 @@ test("the CLI builds deterministically across processes and prints pure JSON", (
 test("STEP export stays valid JSON on stdout despite kernel chatter", () => {
   const out = execFileSync(
     process.execPath,
-    ["src/cli.ts", "export", "examples/servo-bracket/main.ts", "--out", ".vibecad/out/test.step"],
+    ["src/cli.ts", "export", "examples/servo-bracket/main.cad.ts", "--out", ".vibecad/out/test.step"],
     { stdio: ["ignore", "pipe", "ignore"] },
   ).toString();
   assert.equal(JSON.parse(out).ok, true);

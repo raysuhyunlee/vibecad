@@ -21,7 +21,7 @@ camera.position.set(1, -1, 0.8);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.15;
-const world = new THREE.Group();
+let world = new THREE.Group(); // the group of the view on screen
 scene.add(world);
 const raycaster = new THREE.Raycaster();
 
@@ -44,7 +44,6 @@ let selectedPart = null;
 let previewStep = null;
 let previewObject = null;
 let previous = null; // last model, to flash what changed
-let fitted = false;
 let hoverOverlay = null;
 let flashOverlays = [];
 let flashUntil = 0;
@@ -53,6 +52,12 @@ let nextRef = 1;
 let drawMode = false;
 let running = false;
 let hoverKey = "";
+let opened = { root: null, entry: null, files: [], truncated: false, tabs: [] };
+const views = new Map(); // open file -> { world, model, parts, stepMeshes, version, camera }
+let buildPending = false;
+let loadToken = 0;
+const collapsed = new Set();
+const LAST_OPENED = "vibecad.lastOpened";
 
 function decode(b64, Type) {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -70,9 +75,12 @@ function disposeTree(o) {
 }
 
 async function loadModel() {
-  const res = await fetch("/model");
-  if (!res.ok) return;
+  const file = opened.entry;
+  const token = ++loadToken;
+  const res = await fetch(`/model?file=${encodeURIComponent(file)}`);
+  if (!res.ok || token !== loadToken) return;
   const data = await res.json();
+  if (token !== loadToken) return;
   previous = model;
   model = data.model;
   stepMeshes = data.meshes.steps;
@@ -97,10 +105,8 @@ async function loadModel() {
     parts.set(m.path, part);
   }
 
-  if (!fitted) {
-    fit();
-    fitted = true;
-  }
+  if (!views.has(file)) fit();
+  views.set(file, { world, model, parts, stepMeshes, version: data.version, camera: views.get(file)?.camera });
   // Refs stay on the model through rebuilds when their face still exists.
   for (const r of [...refs]) {
     if (!r.part) continue;
@@ -111,6 +117,46 @@ async function loadModel() {
   flashChanges();
   renderDesign();
   renderRefs();
+  renderEmpty();
+}
+
+/** Puts a tab's kept scene on screen, or an empty one until its first build arrives. */
+function showView(file) {
+  loadToken++;
+  [...refs].forEach(removeRef);
+  nextRef = 1;
+  setPreview(null);
+  dropOverlay(hoverOverlay);
+  flashOverlays.forEach(dropOverlay);
+  hoverOverlay = previous = selectedPart = null;
+  flashOverlays = [];
+  hoverKey = "";
+  $("tip").hidden = true;
+  $("source").hidden = true;
+
+  const leaving = views.get(opened.entry);
+  if (leaving) {
+    leaving.camera = { position: camera.position.clone(), target: controls.target.clone(), near: camera.near, far: camera.far };
+  }
+  const view = views.get(file);
+  scene.remove(world);
+  world = view?.world ?? new THREE.Group();
+  scene.add(world);
+  model = view?.model ?? null;
+  parts = view?.parts ?? new Map();
+  stepMeshes = view?.stepMeshes ?? {};
+  if (view?.camera) {
+    camera.position.copy(view.camera.position);
+    controls.target.copy(view.camera.target);
+    camera.near = view.camera.near;
+    camera.far = view.camera.far;
+    camera.updateProjectionMatrix();
+  }
+  renderDesign();
+}
+function dropView(file) {
+  disposeTree(views.get(file).world);
+  views.delete(file);
 }
 
 /** Faces whose semantic id is new, or whose geometry moved, glow for a moment. */
@@ -423,7 +469,11 @@ function row(label, dim, current, onclick) {
   return b;
 }
 function renderDesign() {
-  if (!model) return;
+  $("parts").hidden = !model;
+  if (!model) {
+    $("steps").hidden = $("checks").hidden = true;
+    return;
+  }
   if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
   $("parts").replaceChildren(...model.parts.map((p) =>
     row(p.path || p.type, p.type, selectedPart === p.path, () => {
@@ -524,6 +574,197 @@ async function showSource(src) {
   box.hidden = false;
 }
 
+// --- Project: file tree, folder picker --------------------------------------
+const post = (path, body) => fetch(path, { method: "POST", body: JSON.stringify(body) });
+
+async function openFile(file) {
+  if (file === opened.entry) return;
+  const res = await post("/entry", { file });
+  if (!res.ok) showBanner({ message: (await res.json()).error });
+}
+function treeOf(files) {
+  const top = { dirs: new Map(), files: [] };
+  for (const file of files) {
+    const names = file.split("/");
+    let at = top, path = "";
+    for (const name of names.slice(0, -1)) {
+      path += `${name}/`;
+      if (!at.dirs.has(name)) at.dirs.set(name, { path, dirs: new Map(), files: [] });
+      at = at.dirs.get(name);
+    }
+    at.files.push({ path: file, name: names.at(-1) });
+  }
+  return top;
+}
+function treeRow(name, depth) {
+  const b = document.createElement("button");
+  b.className = "row";
+  b.style.paddingLeft = `calc(var(--s2) + ${depth * 16}px)`;
+  const label = document.createElement("span");
+  label.className = "name";
+  label.textContent = name;
+  b.append(label);
+  return b;
+}
+function treeRows(node, depth = 0) {
+  const out = [];
+  for (const [name, dir] of [...node.dirs].sort(([a], [b]) => a.localeCompare(b))) {
+    const open = !collapsed.has(dir.path);
+    const b = treeRow(name, depth);
+    b.setAttribute("aria-expanded", open);
+    b.insertAdjacentHTML("afterbegin", '<svg aria-hidden="true"><use href="#i-chevron"/></svg>');
+    b.onclick = () => {
+      if (open) collapsed.add(dir.path);
+      else collapsed.delete(dir.path);
+      renderTree();
+    };
+    out.push(b, ...(open ? treeRows(dir, depth + 1) : []));
+  }
+  for (const f of node.files) {
+    const b = treeRow(f.name, depth);
+    b.title = f.path;
+    if (f.path === opened.entry) b.setAttribute("aria-current", "true");
+    b.onclick = () => openFile(f.path);
+    out.push(b);
+  }
+  return out;
+}
+function note(text) {
+  const el = document.createElement("div");
+  el.className = "note";
+  el.textContent = text;
+  return el;
+}
+function renderTree() {
+  $("files").hidden = !opened.root;
+  $("project-name").textContent = opened.name ?? "";
+  $("project-name").title = opened.root ?? "";
+  const rows = treeRows(treeOf(opened.files));
+  if (!rows.length) rows.push(note("No .cad.ts files in this folder"));
+  if (opened.truncated) rows.push(note(`Showing the first ${opened.files.length} files`));
+  $("tree").replaceChildren(...rows);
+}
+function renderEmpty() {
+  const text = !opened.root ? "" : !opened.entry ? "Select a file" : buildPending ? "Building..." : "";
+  $("open-first").hidden = !!opened.root;
+  $("empty-text").textContent = text;
+  $("empty-text").hidden = !text;
+  $("empty").hidden = !!opened.root && !text;
+}
+function renderTabs() {
+  const bar = $("tabs");
+  bar.hidden = !opened.tabs.length;
+  bar.replaceChildren(...opened.tabs.map((t) => {
+    const current = t.file === opened.entry;
+    const name = t.file.split("/").at(-1);
+    const tab = document.createElement("div");
+    tab.className = `tab${t.failed ? " failed" : ""}`;
+    if (current) tab.setAttribute("aria-current", "true");
+    const open = document.createElement("button");
+    open.className = "tab-name";
+    open.setAttribute("role", "tab");
+    open.setAttribute("aria-selected", current);
+    open.title = t.file;
+    open.textContent = name;
+    open.onclick = () => openFile(t.file);
+    const close = document.createElement("button");
+    close.className = "icon";
+    close.setAttribute("aria-label", `Close ${name}`);
+    close.title = `Close ${name}`;
+    close.innerHTML = '<svg><use href="#i-x"/></svg>';
+    close.onclick = () => post("/tab/close", { file: t.file });
+    tab.append(open, close);
+    return tab;
+  }));
+  bar.querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+/** Applies the server's open tabs, and fetches the on-screen tab's build if it is newer. */
+function applyEntry(e) {
+  if (e.entry !== opened.entry) showView(e.entry);
+  opened = { ...opened, entry: e.entry, tabs: e.tabs };
+  for (const file of [...views.keys()]) {
+    if (!e.tabs.some((t) => t.file === file)) dropView(file);
+  }
+  buildPending = e.building === e.entry && !e.built;
+  input.disabled = $("mic").disabled = !e.entry;
+  updateSend();
+  renderTabs();
+  renderTree();
+  renderEmpty();
+  showBanner(e.buildError);
+  const tab = e.tabs.find((t) => t.file === e.entry);
+  if (tab?.version && tab.version !== views.get(e.entry)?.version) loadModel();
+  try {
+    if (opened.root) {
+      localStorage.setItem(LAST_OPENED, JSON.stringify({ path: opened.root, entry: e.entry, tabs: e.tabs.map((t) => t.file) }));
+    }
+  } catch {
+    // Without storage the app just starts on the open-project screen.
+  }
+}
+function applyProject(e) {
+  if (e.root !== opened.root) {
+    showView(null);
+    for (const file of [...views.keys()]) dropView(file);
+    opened.entry = null;
+  }
+  opened = { ...opened, root: e.root, name: e.name, files: e.files, truncated: e.truncated };
+  applyEntry(e);
+  if (e.root) return;
+  try {
+    const last = localStorage.getItem(LAST_OPENED);
+    if (last) post("/project", JSON.parse(last));
+  } catch {
+    // Same as above.
+  }
+}
+
+let browseToken = 0;
+async function browse(path) {
+  const token = ++browseToken;
+  const res = await fetch(path ? `/dirs?path=${encodeURIComponent(path)}` : "/dirs");
+  const d = await res.json();
+  if (token !== browseToken) return;
+  pickerError(res.ok ? "" : d.error);
+  if (!res.ok) return;
+  $("picker-path").value = d.path;
+  $("picker-up").disabled = !d.parent;
+  $("picker-up").onclick = () => browse(d.parent);
+  const list = $("picker-list");
+  list.replaceChildren(...d.dirs.map((name) =>
+    row(name, "", false, () => browse(`${d.path.replace(/[\\/]$/, "")}/${name}`)),
+  ));
+  if (!d.dirs.length) list.append(note("No folders here"));
+  list.scrollTop = 0;
+}
+function pickerError(text) {
+  $("picker-error").textContent = text;
+  $("picker-error").hidden = !text;
+}
+function openPicker() {
+  $("picker").showModal();
+  browse();
+}
+$("open-project").onclick = $("open-first").onclick = openPicker;
+$("picker-close").onclick = () => $("picker").close();
+$("picker").addEventListener("click", (e) => {
+  if (e.target === $("picker")) $("picker").close();
+});
+// A listing still on its way must not overwrite what the person is typing.
+$("picker-path").addEventListener("input", () => browseToken++);
+$("picker-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  browse($("picker-path").value);
+});
+$("picker-open").onclick = async () => {
+  const open = $("picker-open");
+  open.disabled = true;
+  const res = await post("/project", { path: $("picker-path").value });
+  open.disabled = false;
+  pickerError(res.ok ? "" : (await res.json()).error);
+  if (res.ok) $("picker").close();
+};
+
 // --- Conversation -----------------------------------------------------------
 function addMessage(m) {
   const log = $("log");
@@ -540,7 +781,7 @@ function setRunning(on, queued = 0) {
   const q = $("queued");
   q.hidden = queued === 0;
   q.textContent = `${queued} waiting for the agent`;
-  $("new-session").disabled = on;
+  $("new-session").disabled = on || !opened.root;
 }
 function updateSend() {
   const send = $("send");
@@ -550,6 +791,7 @@ function updateSend() {
   send.title = stop ? "Stop agent" : "Send";
   send.querySelector("use").setAttribute("href", stop ? "#i-stop" : "#i-send");
   send.dataset.stop = stop ? "1" : "";
+  send.disabled = !stop && !opened.entry;
 }
 function insertToken(n) {
   if (listening) {
@@ -572,7 +814,7 @@ function payload() {
 }
 async function send() {
   const text = input.value.trim();
-  if (!text) return;
+  if (!text || !opened.entry) return;
   const body = { text, refs: payload(), screenshot: screenshot() };
   input.value = "";
   clearRefs();
@@ -632,7 +874,7 @@ function setMic(on) {
   $("composer").classList.toggle("listening", on);
 }
 function startListening() {
-  if (listening) return;
+  if (listening || !opened.entry) return;
   const err = $("mic-error");
   err.hidden = true;
   if (!Recognition) {
@@ -677,10 +919,10 @@ function stopListening() {
 $("mic").onclick = () => (listening ? stopListening() : startListening());
 
 // --- Keyboard ---------------------------------------------------------------
-const typing = () => document.activeElement === input;
+const typing = () => document.activeElement === input || $("picker").open;
 addEventListener("keydown", (e) => {
   if (typing()) {
-    if (e.key === "Escape") input.blur();
+    if (e.key === "Escape" && !$("picker").open) input.blur();
     return;
   }
   if (e.code === "Space") {
@@ -718,14 +960,15 @@ const events = new EventSource("/events");
 events.onmessage = (ev) => {
   const e = JSON.parse(ev.data);
   if (e.type === "hello") {
+    applyProject(e);
     $("log").replaceChildren();
     e.log.forEach(addMessage);
     setRunning(e.running, e.queued);
-    showBanner(e.buildError);
-    if (e.version > 0) loadModel();
-  } else if (e.type === "build") {
-    showBanner(e.ok ? null : e.error);
-    if (e.ok) loadModel();
+  } else if (e.type === "entry") {
+    applyEntry(e);
+  } else if (e.type === "files") {
+    opened = { ...opened, files: e.files, truncated: e.truncated };
+    renderTree();
   } else if (e.type === "message") {
     addMessage(e);
   } else if (e.type === "status") {
