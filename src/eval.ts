@@ -11,6 +11,10 @@ const HASH_BOUND = 2147483647;
 const DEG = Math.PI / 180;
 const vec = (v: readonly number[]) => ({ x: v[0]!, y: v[1]!, z: v[2]! });
 const tuple = (v: { x: number; y: number; z: number }): Vec3 => [v.x, v.y, v.z];
+const add = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const scale = (a: Vec3, s: number): Vec3 => [a[0] * s, a[1] * s, a[2] * s];
+const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
 export class CadError extends Error {
   readonly code: string;
@@ -307,9 +311,19 @@ class Evaluator {
       case "chamfer": {
         const solid = this.singleSolid(n, first);
         const es = this.selectEdges(n, solid, first, a.sel);
-        const ev = n.op === "fillet"
-          ? k.filletWithHistory(solid, es, a.radius, this.hashes(inputs), HASH_BOUND)
-          : k.chamferWithHistory(solid, es, a.distance, this.hashes(inputs), HASH_BOUND);
+        if (n.op === "chamfer") {
+          const ev = k.chamferWithHistory(solid, es, a.distance, this.hashes(inputs), HASH_BOUND);
+          return this.track(n, ev.result, ev, inputs);
+        }
+        let ev: EvolutionData;
+        try {
+          ev = k.filletWithHistory(solid, es, a.radius, this.hashes(inputs), HASH_BOUND);
+        } catch (e) {
+          // OCCT cannot run a fillet out over a curved end. See runoutFillet.
+          const made = this.runoutFillet(solid, es, a.radius, inputs);
+          if (!made) throw e;
+          ev = made;
+        }
         return this.track(n, ev.result, ev, inputs);
       }
       case "shell": {
@@ -333,6 +347,65 @@ class Evaluator {
         return this.track(n, ev.result, ev, inputs);
       }
     }
+  }
+
+  /**
+   * Fills straight concave corners between flat faces directly, for the fillets the kernel refuses.
+   * Each filler spans its edge and is clipped to the outlines of both faces, so it ends where they do.
+   * Returns undefined when any edge is another kind, so the caller reports the kernel's error.
+   */
+  runoutFillet(solid: ShapeHandle, es: ShapeHandle[], r: number, inputs: Evaluated[]): EvolutionData | undefined {
+    const k = this.k;
+    const eps = 1e-3;
+    const point = (p: Vec3) => k.makeVertex(p[0], p[1], p[2]);
+    const fillers: ShapeHandle[] = [];
+    for (const edge of es) {
+      if (k.curveType(edge) !== "line") return undefined;
+      const h = this.hash(edge);
+      const sides = this.faces(solid).filter((f) => k.getSubShapes(f, "edge").some((x) => this.hash(x) === h));
+      if (sides.length !== 2 || sides.some((f) => k.surfaceType(f) !== "plane")) return undefined;
+      const [v0, v1] = k.getSubShapes(edge, "vertex");
+      if (v0 === undefined || v1 === undefined) return undefined;
+      const p0 = tuple(k.vertexPosition(v0)), p1 = tuple(k.vertexPosition(v1));
+      const length = Math.hypot(...sub(p1, p0));
+      const dir = norm(sub(p1, p0));
+      const mid = add(p0, scale(dir, length / 2));
+      const inward = sides.map((f) => {
+        const data = k.surfaceData(f);
+        if (data.kind !== "plane") throw new Error("not a plane");
+        const w = cross(dir, tuple(data.normal));
+        return k.distanceBetween(f, point(add(mid, scale(w, eps)))) < eps / 1000 ? w : scale(w, -1);
+      }) as [Vec3, Vec3];
+      const between = Math.acos(Math.min(1, Math.max(-1, dot(inward[0], inward[1]))));
+      if (between < 1e-6 || Math.PI - between < 1e-6) return undefined;
+      const unitBisector = norm(add(inward[0], inward[1]));
+      // In a concave corner the space between the faces is empty; in a convex one it is the solid.
+      if (k.containsPoint(solid, vec(add(mid, scale(unitBisector, eps))))) return undefined;
+      const reach = r / Math.tan(between / 2);
+      const onA = add(p0, scale(inward[0], reach)), onB = add(p0, scale(inward[1], reach));
+      const arcMid = add(p0, scale(unitBisector, r / Math.sin(between / 2) - r));
+      const profile = k.makeFace(k.makeWire([
+        k.makeLineEdge(vec(p0), vec(onA)),
+        k.makeArcEdge(vec(onA), vec(arcMid), vec(onB)),
+        k.makeLineEdge(vec(onB), vec(p0)),
+      ]));
+      let filler = k.extrude(profile, ...scale(dir, length));
+      sides.forEach((f, i) => {
+        const away = inward[1 - i]!;
+        const data = k.surfaceData(f);
+        if (data.kind !== "plane") throw new Error("not a plane");
+        const n = tuple(data.normal);
+        const out = scale(n, dot(n, away) > 0 ? reach + r : -(reach + r));
+        filler = k.common(filler, k.extrude(f, ...out));
+      });
+      if (this.faces(filler).length === 0) return undefined;
+      fillers.push(filler);
+    }
+    const ev = k.booleanOp(BooleanOp.Fuse, [solid], fillers, {
+      inputFaceHashes: this.hashes(inputs),
+      hashUpperBound: HASH_BOUND,
+    });
+    return k.isValid(ev.result) ? ev : undefined;
   }
 
   face(p: Profile) {

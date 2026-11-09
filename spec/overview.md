@@ -52,6 +52,7 @@
 - a swept profile's wall takes its segment's name, or else `side[i]`, its place in the outline counting rounds; an outline of one segment gives `side`
 - caps are `top` and `bottom` on an extrude, `start` and `end` on a partial revolve; these and `side` are reserved as segment names
 - `fillet` and `chamfer` follow the kernel: they carry on along edges tangent to the selection
+- when the kernel refuses a fillet on straight concave edges between flat faces, vibecad fills each corner directly: the fill spans the edge and is clipped to both faces' outlines. Any other refused fillet stays an error
 
 ## cli
 
@@ -107,7 +108,8 @@
 
 ## status
 
-- modeling priority, draft: (1) fillet runout; (2) sketches on any plane; (3) sketch offset; (4) spline; (5) constraint solver
+- modeling priority, draft: (1) sketches on any plane; (2) sketch offset; (3) spline; (4) constraint solver
+- wip: fillet runout on curved walls or convex edges
 - wip: closed-loop linkages and more joint kinds (cylindrical, ball, planar)
 - wip: drawn strokes stay in place when a joint moves; pins follow their part
 - wip: sketch constraint solver, sweep, loft, draft, drawings, sheet metal
@@ -130,3 +132,4 @@
 - 2026-11-09: open STEP files directly as entries
 - 2026-11-09: add revolute and slider joints, poses, and range sweeps in `test`
 - 2026-11-09: add the path builder; walls take their segment's name through kernel history
+- 2026-11-09: fill refused fillets on straight concave edges between flat faces

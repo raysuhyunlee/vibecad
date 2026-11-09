@@ -170,6 +170,31 @@ test("a path reports bad geometry where it was written", () => {
   assert.throws(() => path([0, 0]).line([5, 0]).named("top"), /bad segment name/);
 });
 
+test("a fillet the kernel refuses is filled, and stops where the wall's outline curves in", async () => {
+  // The fillet reaches 3 up the wall, but its side curves in from 2 up.
+  const outline = path([-20, 0]).line([20, 0]).line([20, 2])
+    .arc([10, 2], [15, 2 + 10 * Math.sin(Math.PI / 3)])
+    .line([-15, 2 + 10 * Math.sin(Math.PI / 3)])
+    .arc([-10, 2], [-20, 2]).close();
+  const wall = extrude(outline, 2).named("wall").rotate("x", 90).translate(0, 2, 0);
+  const body = wall.union(box(40, 30, 2).named("floor").translate(0, 0, -2));
+  const r = 3;
+  const plain = await build(part("P", () => body)());
+  const out = await build(part("P", () => body.fillet(r, edges.between("wall.bottom", "floor.top")).named("f"))());
+  const m = out.model.parts[0]!;
+  assert.ok((await getKernel()).isValid([...out.shapes.values()][0]!));
+  assert.ok(m.faces.some((f) => f.name === "f" && f.surface === "cylinder"));
+  const added = m.volume - plain.model.parts[0]!.volume;
+  const full = (1 - Math.PI / 4) * r ** 2 * 40;
+  assert.ok(added > 0.95 * full && added < full, `${added} of ${full}`);
+});
+
+test("a fillet still fails when it is not a concave corner between flat faces", async () => {
+  const roundOuter = extrude(path([0, 0]).line([10, 0]).line([10, 10]).line([0, 10]).close(), 5).named("b")
+    .fillet(20, edges.between("b.side[0]", "b.top"));
+  await assert.rejects(build(part("P", () => roundOuter)()), (e: CadError) => e.code === "OP_FAILED");
+});
+
 test("mates place parts, nest through assemblies, and run checks", async () => {
   const block = part("Block", () => ({
     solid: box(10, 10, 10).named("b"),
