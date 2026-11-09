@@ -1,13 +1,14 @@
 // The live preview server: rebuilds on save, and carries human feedback to the agent.
 import { spawn, type ChildProcess } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { homedir } from "node:os";
+import { constants as osConstants, homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AgentRunner, cliCommand } from "./agent.ts";
 import { CONFIG_FILE } from "./config.ts";
 import type { FaceInfo, Model } from "./eval.ts";
+import { ensureDir } from "./fs.ts";
 import { STEP_FILE } from "./lang.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -147,6 +148,11 @@ export async function serve(o: {
   // --- Builds ---------------------------------------------------------------
   let building: ChildProcess | undefined;
   let buildingFile: string | undefined;
+  // A build must not outlive the app. Left running, it can lose its project folder too.
+  process.on("exit", () => building?.kill());
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => process.exit(128 + osConstants.signals[signal]));
+  }
   let timer: NodeJS.Timeout | undefined;
   const runBuild = () => {
     const file = entry;
@@ -242,7 +248,7 @@ export async function serve(o: {
     root = process.cwd();
     log.length = 0;
     queue.length = 0;
-    mkdirSync(".vibecad", { recursive: true });
+    ensureDir(".vibecad");
     writeFileSync(".vibecad/.gitignore", "*\n");
     writeFileSync(DEV_FILE, JSON.stringify({ port: o.port }));
     project = listFiles();
@@ -426,7 +432,7 @@ export async function serve(o: {
         const pose = Object.entries(b.pose ?? {}).filter(([, v]) => Number.isFinite(v)).map(([j, v]) => `${j}=${v}`);
         if (pose.length) feedback.pose = pose.join(",");
         if (typeof b.screenshot === "string" && b.screenshot.startsWith("data:image/png;base64,")) {
-          mkdirSync(".vibecad/feedback", { recursive: true });
+          ensureDir(".vibecad/feedback");
           feedback.screenshot = `.vibecad/feedback/${Date.now()}-${id}.png`;
           writeFileSync(feedback.screenshot, Buffer.from(b.screenshot.slice(22), "base64"));
         }

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Every command prints one JSON document to stdout, and exits non-zero on failure.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { build, CadError, getKernel, type BuildOutput, type Model } from "./eval.ts";
+import { ensureDir } from "./fs.ts";
 import { isInstance, STEP_FILE, stepEntry, type Instance } from "./lang.ts";
 
 // Projects anywhere on disk import the language as "vibecad".
@@ -96,7 +97,7 @@ function summary(m: Model) {
 }
 
 async function writeOutputs(out: BuildOutput, dir: string) {
-  mkdirSync(dir, { recursive: true });
+  ensureDir(dir);
   writeFileSync(`${dir}/model.json`, JSON.stringify(out.model, null, 2));
   writeFileSync(`${dir}/meshes.json`, JSON.stringify({
     parts: out.meshes.map(encodeMesh),
@@ -207,7 +208,7 @@ async function main() {
     case "render": {
       const png = await k.toMultiviewPNG(await pick(out, o.part));
       const file = o.out ?? `${OUT_DIR}/render.png`;
-      mkdirSync(resolve(file, ".."), { recursive: true });
+      ensureDir(resolve(file, ".."));
       writeFileSync(file, png);
       print({ ok: true, file });
       return;
@@ -242,7 +243,7 @@ async function show(part?: string, face?: string, message?: string) {
 async function diff(ref: string | undefined, entry: string) {
   if (!ref) throw new CadError("MISSING_REF", "diff needs a git ref");
   const tmp = `.vibecad/tmp/diff-${process.pid}`;
-  mkdirSync(".vibecad/tmp", { recursive: true });
+  ensureDir(".vibecad/tmp");
   execFileSync("git", ["worktree", "add", "--detach", "-q", tmp, ref], { stdio: "pipe" });
   try {
     const before = await build(await load(`${tmp}/${entry}`));

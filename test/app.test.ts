@@ -231,6 +231,43 @@ test("the keep limit drops the longest unseen build, and that tab rebuilds when 
   }
 });
 
+test("stopping the app stops its running build", { skip: process.platform === "win32" }, async () => {
+  const slow = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-slow-")));
+  writeFileSync(join(slow, "main.cad.ts"), `import { box, part } from "vibecad";
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60_000);
+export default part("S", () => box(1, 1, 1))();
+`);
+  const port = PORT + 7;
+  const running = startApp({ port });
+  await new Promise((ok) => running.stdout.once("data", ok));
+  try {
+    await fetch(`http://127.0.0.1:${port}/project`, { method: "POST", body: JSON.stringify({ path: slow, entry: "main.cad.ts" }) });
+    const children = () => spawnSync("pgrep", ["-P", String(running.pid)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number);
+    let build: number | undefined;
+    for (let i = 0; i < 100 && build === undefined; i++) {
+      build = children()[0];
+      if (build === undefined) await new Promise((ok) => setTimeout(ok, 50));
+    }
+    assert.ok(build, "the build started");
+    const gone = new Promise((ok) => running.once("close", ok));
+    running.kill();
+    await gone;
+    let alive = true;
+    for (let i = 0; i < 100 && alive; i++) {
+      try {
+        process.kill(build, 0);
+        await new Promise((ok) => setTimeout(ok, 50));
+      } catch {
+        alive = false;
+      }
+    }
+    assert.equal(alive, false, "the build outlived the app");
+  } finally {
+    running.kill();
+    rmSync(slow, { recursive: true, force: true });
+  }
+});
+
 test("a bad setting stops the app and names the file", async () => {
   for (const [config, text] of [[{ keepMb: -1 }, "keepMb"], [{ typo: 1 }, "typo"]] as const) {
     const child = startApp(config);

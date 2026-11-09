@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   assembly, box, check, cylinder, edges, extrude, importStep, mate, minClearance, noCollision, outerTangent, part, path, polygon, port,
@@ -19,7 +21,7 @@ test("faces keep their names through booleans, and point at source", async () =>
   const bore = faces.find((f) => f.id === "bore.side");
   assert.equal(bore?.surface, "cylinder");
   assert.match(bore!.src.file, /core\.test\.ts$/);
-  assert.equal(bore!.src.line, 13);
+  assert.equal(bore!.src.line, 15);
   assert.ok(faces.find((f) => f.id === "base.top"));
   assert.equal(new Set(faces.map((f) => f.id)).size, faces.length);
 });
@@ -193,6 +195,19 @@ test("a fillet still fails when it is not a concave corner between flat faces", 
   const roundOuter = extrude(path([0, 0]).line([10, 0]).line([10, 10]).line([0, 10]).close(), 5).named("b")
     .fillet(20, edges.between("b.side[0]", "b.top"));
   await assert.rejects(build(part("P", () => roundOuter)()), (e: CadError) => e.code === "OP_FAILED");
+});
+
+test("creating a folder fails, not spins, when the working directory is gone", () => {
+  const fsModule = new URL("../src/fs.ts", import.meta.url).href;
+  const dir = mkdtempSync(join(tmpdir(), "vibecad-gone-"));
+  const script = `
+    import { rmdirSync } from "node:fs";
+    import { ensureDir } from ${JSON.stringify(fsModule)};
+    process.cwd();
+    rmdirSync(${JSON.stringify(dir)});
+    try { ensureDir(".vibecad/preview"); console.log("created"); } catch (e) { console.log(e.code); }`;
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], { cwd: dir, encoding: "utf8", timeout: 20_000 });
+  assert.match(out, /NO_WORKING_DIR|ENOENT/);
 });
 
 test("mates place parts, nest through assemblies, and run checks", async () => {

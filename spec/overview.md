@@ -78,6 +78,7 @@
 - pins, the draft message, the pose and the camera stay with their tab until it closes, even when its build is dropped; a pin goes when its face no longer exists
 - a message carries only the pins of the tab it is sent from
 - only the tab on screen builds; saving any `.ts` marks the others stale, and they rebuild behind the kept model when shown
+- stopping the app stops its running build; a build whose working directory is gone fails with `NO_WORKING_DIR`
 - preview builds write to `.vibecad/preview`, so an agent's own build in `.vibecad/out` cannot land in a tab
 - other `.ts` files are plain code: not listed, but saving one rebuilds
 - the left panel has a slider per joint; moving one changes the view without a rebuild, using the joint data in `model.json`, and never writes the source
@@ -133,3 +134,4 @@
 - 2026-11-09: add revolute and slider joints, poses, and range sweeps in `test`
 - 2026-11-09: add the path builder; walls take their segment's name through kernel history
 - 2026-11-09: fill refused fillets on straight concave edges between flat faces
+- 2026-11-09: builds stop with the app and fail when their working directory is gone

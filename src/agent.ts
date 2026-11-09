@@ -2,11 +2,13 @@
 // Sessions never touch the user's open terminal sessions.
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const SESSIONS_FILE = ".vibecad/sessions.json";
+import { ensureDir } from "./fs.ts";
+
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
 
 export type AgentEvent =
@@ -126,7 +128,7 @@ export class AgentRunner {
     const all = this.sessions();
     if (id) all[this.key()] = id;
     else delete all[this.key()];
-    mkdirSync(".vibecad", { recursive: true });
+    ensureDir(".vibecad");
     writeFileSync(SESSIONS_FILE, JSON.stringify(all, null, 2));
   }
   session() {
