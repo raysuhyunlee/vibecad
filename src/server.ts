@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { AgentRunner, cliCommand } from "./agent.ts";
 import { CONFIG_FILE } from "./config.ts";
 import type { FaceInfo, Model } from "./eval.ts";
+import { STEP_FILE } from "./lang.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(HERE, "cli.ts");
@@ -19,6 +20,7 @@ const PREVIEW_DIR = ".vibecad/preview"; // apart from the agent's own builds in 
 const MAX_FILES = 2000; // keeps an accidental open of a huge folder responsive
 const MAX_DIRS = 5000;
 const ENTRY_SUFFIX = ".cad.ts";
+const isEntry = (path: string) => path.endsWith(ENTRY_SUFFIX) || STEP_FILE.test(path);
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -69,7 +71,7 @@ function listFiles() {
         if (hiddenName(item.name)) continue;
         const path = dir === "." ? item.name : `${dir}/${item.name}`;
         if (item.isDirectory()) dirs.push(path);
-        else if (item.isFile() && path.endsWith(ENTRY_SUFFIX)) files.push(path);
+        else if (item.isFile() && isEntry(path)) files.push(path);
       }
     } catch {
       // An unreadable folder just stays out of the list.
@@ -208,17 +210,14 @@ export async function serve(o: {
     tabs.delete(file);
     setEntry(file === entry ? open[i + 1] ?? open[i - 1] : entry);
   };
-  /** A project-relative `.ts` path that exists, or undefined. */
-  const projectFile = (file: unknown) => {
+  /** A project-relative path that exists and passes `accept`, or undefined. */
+  const projectFile = (file: unknown, accept: (path: string) => boolean) => {
     if (typeof file !== "string" || !root) return undefined;
     const target = resolve(file);
-    if (!target.endsWith(".ts") || !inside(root, target) || !existsSync(target)) return undefined;
+    if (!accept(target) || !inside(root, target) || !existsSync(target)) return undefined;
     return relative(root, target).replaceAll(sep, "/");
   };
-  const projectEntry = (file: unknown) => {
-    const path = projectFile(file);
-    return path?.endsWith(ENTRY_SUFFIX) ? path : undefined;
-  };
+  const projectEntry = (file: unknown) => projectFile(file, isEntry);
   let filesTimer: NodeJS.Timeout | undefined;
   const scheduleFiles = () => {
     clearTimeout(filesTimer);
@@ -249,11 +248,12 @@ export async function serve(o: {
     watcher?.close();
     watcher = watch(".", { recursive: true }, (_event, file) => {
       if (!file || file.split(/[\\/]/).some(hiddenName)) return;
-      if (file.endsWith(".ts")) {
+      const source = file.endsWith(".ts") || STEP_FILE.test(file);
+      if (source) {
         for (const tab of tabs.values()) tab.stale = true;
         scheduleBuild();
       }
-      if (file.endsWith(".ts") || !extname(file)) scheduleFiles();
+      if (source || !extname(file)) scheduleFiles();
     });
     watcher.on("error", () => {});
     for (const file of Array.isArray(wantedTabs) ? wantedTabs : []) {
@@ -356,7 +356,7 @@ export async function serve(o: {
           return;
         }
         if (path === "/source") {
-          const target = projectFile(url.searchParams.get("file"));
+          const target = projectFile(url.searchParams.get("file"), (p) => p.endsWith(".ts"));
           if (!target) return json(res, { error: "Not found" }, 404);
           return json(res, { lines: readFileSync(target, "utf8").split("\n") });
         }

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  assembly, box, check, cylinder, edges, mate, minClearance, part, port,
+  assembly, box, check, cylinder, edges, importStep, mate, minClearance, part, port,
 } from "../src/index.ts";
-import { build, CadError } from "../src/eval.ts";
+import { build, CadError, getKernel } from "../src/eval.ts";
 
 const plate = part("Plate", (p: { hole?: number }) =>
   box(40, 20, 5).named("base").cut(cylinder(p.hole ?? 2, 10).named("bore").translate(0, 0, -1)),
@@ -16,7 +17,7 @@ test("faces keep their names through booleans, and point at source", async () =>
   const bore = faces.find((f) => f.id === "bore.side");
   assert.equal(bore?.surface, "cylinder");
   assert.match(bore!.src.file, /core\.test\.ts$/);
-  assert.equal(bore!.src.line, 10);
+  assert.equal(bore!.src.line, 11);
   assert.ok(faces.find((f) => f.id === "base.top"));
   assert.equal(new Set(faces.map((f) => f.id)).size, faces.length);
 });
@@ -95,6 +96,42 @@ test("STEP export stays valid JSON on stdout despite kernel chatter", () => {
     { stdio: ["ignore", "pipe", "ignore"] },
   ).toString();
   assert.equal(JSON.parse(out).ok, true);
+});
+
+test("an imported STEP solid keeps its geometry, takes features, and points at source", async () => {
+  const k = await getKernel();
+  const original = await build(plate());
+  mkdirSync(".vibecad/out", { recursive: true });
+  writeFileSync(".vibecad/out/plate.step", k.exportStep([...original.shapes.values()][0]!));
+
+  const imported = () => importStep("../.vibecad/out/plate.step").named("plate");
+  const { model } = await build(part("Imported", imported)());
+  const p = model.parts[0]!;
+  assert.ok(Math.abs(p.volume - original.model.parts[0]!.volume) < 1e-3);
+  assert.equal(p.faces.length, original.model.parts[0]!.faces.length);
+  assert.equal(p.faces[0]!.id, "plate.face[0]");
+  assert.match(p.faces[0]!.src.file, /core\.test\.ts$/);
+
+  const edited = imported().translate(0, 0, 5).cut(box(4, 4, 20).named("slot").translate(10, 0, 0));
+  const after = (await build(part("Edited", () => edited)())).model.parts[0]!;
+  assert.ok(after.faces.some((f) => f.name === "slot.left"));
+  assert.ok(after.faces.some((f) => f.name.startsWith("plate.face[")));
+  assert.equal(after.bbox.min[2], 5);
+});
+
+test("a bad STEP file reports its code and source line", async () => {
+  await assert.rejects(build(part("Missing", () => importStep("nope.step"))()), (e: CadError) => {
+    assert.equal(e.code, "STEP_NOT_FOUND");
+    assert.match(e.src!.file, /core\.test\.ts$/);
+    return true;
+  });
+  mkdirSync(".vibecad/out", { recursive: true });
+  writeFileSync(".vibecad/out/bad.step", "not a step file");
+  await assert.rejects(build(part("Bad", () => importStep("../.vibecad/out/bad.step"))()), (e: CadError) => {
+    assert.ok(["OP_FAILED", "EMPTY_RESULT"].includes(e.code));
+    assert.match(e.hint!, /valid STEP/);
+    return true;
+  });
 });
 
 test("mesh face groups cover every triangle exactly once", async () => {

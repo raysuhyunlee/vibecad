@@ -1,5 +1,6 @@
 // The declarative language: pure functions that build a feature graph.
 // Nothing here touches the kernel. eval.ts turns the graph into geometry.
+import { basename, dirname, resolve } from "node:path";
 
 export type Vec3 = [number, number, number];
 export interface Src {
@@ -102,7 +103,7 @@ let nextId = 1;
 let opCounts = new Map<string, number>();
 
 export type OpName =
-  | "box" | "cylinder" | "cone" | "sphere" | "extrude" | "revolve"
+  | "box" | "cylinder" | "cone" | "sphere" | "extrude" | "revolve" | "importStep"
   | "union" | "cut" | "intersect"
   | "fillet" | "chamfer" | "shell"
   | "translate" | "rotate" | "mirror";
@@ -200,6 +201,19 @@ export function extrude(profile: Profile, height: number): Solid {
 }
 export function revolve(profile: Profile, axis: Axis = "y", degrees = 360): Solid {
   return new Solid("revolve", { profile, axis: toVec(axis), degrees }, []);
+}
+/** Loads a STEP file, relative to the calling source file. Faces: face[i], in file order. */
+export function importStep(file: string): Solid {
+  const src = callerSrc();
+  return new Solid("importStep", { path: resolve(dirname(src.file), file) }, [], src);
+}
+export const STEP_FILE = /\.(step|stp)$/i;
+/** A STEP file opened directly as an entry: one part named after the file. */
+export function stepEntry(file: string): Instance {
+  const src: Src = { file, line: 1, col: 1 };
+  const name = basename(file).replace(STEP_FILE, "");
+  const solid = new Solid("importStep", { path: resolve(file) }, [], src, name);
+  return new Instance({ typeName: name, params: {}, src, solid });
 }
 /** Fuses solids into one. */
 export function union(first: Solid, ...rest: Array<Solid | Solid[]>): Solid {

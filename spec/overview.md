@@ -29,6 +29,10 @@
 ## language
 
 - primitives: `box cylinder cone sphere extrude revolve`
+- import: `importStep(file)` loads a STEP file as a solid, with its path relative to the calling source file
+- an imported file has no feature names, so its faces are `<feature>.face[i]` in file order; replacing the file can renumber them, so prefer selecting the whole feature, `edges.of("motor").curve("circle")`
+- STEP files are tracked in git, because `diff` builds revisions from git; saving one in the project rebuilds
+- a STEP file is also an entry: every command and the app open it directly as one part named after the file, with no ports and no TypeScript source
 - profiles: `polygon rect circle roundedRect`
 - features: `union cut intersect fillet chamfer shell translate rotate mirror`
 - structure: `part assembly port mate named`
@@ -52,7 +56,7 @@
 - the person opens a project root with an in-app folder picker, served by the local server so it works on every OS
 - opening a project runs its TypeScript in a build process, so only the person's own action opens one
 - one app serves one project: the server's working directory is the root, and builds, agents and `.vibecad/` resolve against it
-- the left panel lists the root's `*.cad.ts` files, skipping dot folders and `node_modules`, and updates as files change
+- the left panel lists the root's `*.cad.ts` and STEP files, skipping dot folders and `node_modules`, and updates as files change
 - selecting a file opens it in a tab; a project opens on `main.cad.ts` when it has one
 - a tab keeps its last good build until it closes, so switching tabs renders at once
 - kept builds have a limit, `keepMb`, measured on build output; over it, the longest unseen build is dropped, and that tab rebuilds when shown; the tab on screen is never dropped
@@ -103,3 +107,5 @@
 - 2026-11-09: open files stay in tabs and keep their last build
 - 2026-11-09: limit kept builds; pins and drafts stay with their tab
 - 2026-11-09: move app settings from CLI flags to a config file
+- 2026-11-09: import STEP files as solids
+- 2026-11-09: open STEP files directly as entries

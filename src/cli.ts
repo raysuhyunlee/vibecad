@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { build, CadError, getKernel, type BuildOutput, type Model } from "./eval.ts";
-import { isInstance, type Instance } from "./lang.ts";
+import { isInstance, STEP_FILE, stepEntry, type Instance } from "./lang.ts";
 
 // Projects anywhere on disk import the language as "vibecad".
 registerHooks({
@@ -27,6 +27,7 @@ process.stdout.write = ((chunk: unknown) => {
 const OUT_DIR = ".vibecad/out";
 const DEV_FILE = ".vibecad/dev.json";
 const USAGE = `vibecad <command> [entry=main.cad.ts]
+An entry is a *.cad.ts or STEP file.
 
   build [entry] [--steps] [--out-dir dir]
                                  Build; writes ${OUT_DIR}/model.json and meshes.json
@@ -56,6 +57,7 @@ function describe(e: unknown) {
 }
 
 async function load(entry: string): Promise<Instance> {
+  if (STEP_FILE.test(entry)) return stepEntry(entry);
   const mod = await import(pathToFileURL(resolve(entry)).href);
   const value = typeof mod.default === "function" ? mod.default() : mod.default;
   if (!isInstance(value)) {
@@ -193,7 +195,7 @@ async function main() {
       if (!o.out) throw new CadError("MISSING_OUT", "export needs --out file.step or file.stl");
       const shape = await pick(out, o.part);
       if (o.out.endsWith(".stl")) writeFileSync(o.out, k.exportStl(shape));
-      else if (o.out.endsWith(".step") || o.out.endsWith(".stp")) writeFileSync(o.out, k.exportStep(shape));
+      else if (STEP_FILE.test(o.out)) writeFileSync(o.out, k.exportStep(shape));
       else throw new CadError("BAD_FORMAT", "Use a .step, .stp or .stl file name");
       print({ ok: true, file: o.out });
       return;

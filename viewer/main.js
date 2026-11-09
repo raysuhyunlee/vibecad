@@ -650,7 +650,7 @@ function renderTree() {
   $("project-name").textContent = opened.name ?? "";
   $("project-name").title = opened.root ?? "";
   const rows = treeRows(treeOf(opened.files));
-  if (!rows.length) rows.push(note("No .cad.ts files in this folder"));
+  if (!rows.length) rows.push(note("No .cad.ts or STEP files in this folder"));
   if (opened.truncated) rows.push(note(`Showing the first ${opened.files.length} files`));
   $("tree").replaceChildren(...rows);
 }

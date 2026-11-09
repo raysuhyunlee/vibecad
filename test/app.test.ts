@@ -170,6 +170,35 @@ test("closing a tab shows its neighbour and forgets its build", async () => {
   assert.equal((await fetch(`${URL_BASE}/model?file=parts/other.cad.ts`)).status, 404);
 });
 
+test("a STEP file opens directly, has no source panel, and rebuilds on save", async () => {
+  const exportTo = (entry: string) =>
+    assert.equal(spawnSync(process.execPath, [CLI, "export", entry, "--out", "Part One.STEP"], { cwd: root }).status, 0);
+  const listed = nextEvent((e) => e.type === "files" && e.files.includes("Part One.STEP"));
+  await new Promise((ok) => setTimeout(ok, 100));
+  exportTo("main.cad.ts");
+  await listed;
+
+  const file = encodeURIComponent("Part One.STEP");
+  const part = async () => {
+    const res = await fetch(`${URL_BASE}/model?file=${file}`);
+    return res.ok ? ((await res.json()) as any).model.parts[0] : undefined;
+  };
+  assert.equal((await post("/entry", { file: "Part One.STEP" })).status, 200);
+  await waitBuilt("Part One.STEP");
+  const first = await part();
+  assert.equal(first.type, "Part One");
+  assert.equal(first.faces[0].id, "Part One.face[0]");
+  assert.deepEqual(first.bbox.size, [1, 2, 3]);
+  assert.equal((await fetch(`${URL_BASE}/source?file=${file}`)).status, 404);
+
+  exportTo("parts/other.cad.ts");
+  for (let i = 0; String((await part())?.bbox.size) !== "4,4,4"; i++) {
+    assert.ok(i < 100, "saving the STEP file did not rebuild");
+    await new Promise((ok) => setTimeout(ok, 100));
+  }
+  assert.equal((await post("/tab/close", { file: "Part One.STEP" })).status, 200);
+});
+
 test("the keep limit drops the longest unseen build, and that tab rebuilds when shown", async () => {
   const small = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-keep-")));
   const source = (name: string) => `import { box, part } from "vibecad";\nexport default part("${name}", () => ({ solid: box(1, 1, 1).named("a"), ports: {} }))({});\n`;

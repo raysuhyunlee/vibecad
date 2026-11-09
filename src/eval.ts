@@ -1,5 +1,6 @@
 // Evaluates the feature graph on OCCT and tracks every face back to its source.
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { BooleanOp, OcctKernel, type ShapeHandle } from "occt-wasm";
 import {
   EdgeSel, Instance, Solid,
@@ -236,6 +237,18 @@ class Evaluator {
           n,
           k.revolve(this.face(a.profile), { point: vec([0, 0, 0]), direction: vec(a.axis) }, a.degrees * DEG),
         );
+      case "importStep": {
+        if (!existsSync(a.path)) {
+          throw new CadError("STEP_NOT_FOUND", `No STEP file at ${a.path}`, n.src, "The path is relative to the source file that calls importStep.");
+        }
+        const shape = k.importStep(readFileSync(a.path, "utf8"));
+        const faces = this.faces(shape);
+        if (faces.length === 0) {
+          throw new CadError("EMPTY_RESULT", `${a.path} has no faces`, n.src, hintFor(n));
+        }
+        const tags = new Map(faces.map((f, i): [number, Tag] => [this.hash(f), { name: `${n.name}.face[${i}]`, src: n.src }]));
+        return { shape, tags };
+      }
       case "cut":
       case "union":
       case "intersect": {
@@ -354,6 +367,7 @@ function hintFor(n: Solid) {
     return "The radius may be too large for the adjacent faces, or the selection ends mid-edge.";
   }
   if (n.op === "cut" || n.op === "intersect") return "The tools may not overlap the body.";
+  if (n.op === "importStep") return "Check that the file is a valid STEP file with solid geometry.";
   return undefined;
 }
 

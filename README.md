@@ -17,7 +17,7 @@ Settings live in `~/.vibecad/config.json`: `port`, `agent`, `model`, `keepMb`.
 
 ## A part
 
-Modeling files are named `*.cad.ts` and default-export what they show. A part with required params exports a preview, for example `export default () => Plate({ hole: 3 })`. Other `.ts` files are plain code.
+Modeling files are named `*.cad.ts` and default-export what they show. A part with required params exports a preview, for example `export default () => Plate({ hole: 3 })`. Other `.ts` files are plain code. STEP files open directly in the app, and `importStep("motor.step")` brings one into a part.
 
 ```ts
 export const Plate = part("Plate", (p: { hole: number }) => ({
