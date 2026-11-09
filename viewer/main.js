@@ -53,7 +53,8 @@ let drawMode = false;
 let running = false;
 let hoverKey = "";
 let opened = { root: null, entry: null, files: [], truncated: false, tabs: [] };
-const views = new Map(); // open file -> { world, model, parts, stepMeshes, version, camera }
+const views = new Map(); // open file -> its kept build: { world, model, parts, stepMeshes, version }
+const keptByTab = new Map(); // open file -> what outlives its build: { refs, nextRef, draft, camera }
 let buildPending = false;
 let loadToken = 0;
 const collapsed = new Set();
@@ -105,8 +106,8 @@ async function loadModel() {
     parts.set(m.path, part);
   }
 
-  if (!views.has(file)) fit();
-  views.set(file, { world, model, parts, stepMeshes, version: data.version, camera: views.get(file)?.camera });
+  if (!views.has(file) && !keptByTab.get(file)?.camera) fit();
+  views.set(file, { world, model, parts, stepMeshes, version: data.version });
   // Refs stay on the model through rebuilds when their face still exists.
   for (const r of [...refs]) {
     if (!r.part) continue;
@@ -120,11 +121,10 @@ async function loadModel() {
   renderEmpty();
 }
 
-/** Puts a tab's kept scene on screen, or an empty one until its first build arrives. */
+/** Puts a tab on screen with its pins, draft and camera, and its scene once it has a build. */
 function showView(file) {
   loadToken++;
-  [...refs].forEach(removeRef);
-  nextRef = 1;
+  cancelListening();
   setPreview(null);
   dropOverlay(hoverOverlay);
   flashOverlays.forEach(dropOverlay);
@@ -134,10 +134,19 @@ function showView(file) {
   $("tip").hidden = true;
   $("source").hidden = true;
 
-  const leaving = views.get(opened.entry);
-  if (leaving) {
-    leaving.camera = { position: camera.position.clone(), target: controls.target.clone(), near: camera.near, far: camera.far };
+  if (opened.entry) {
+    keptByTab.set(opened.entry, {
+      refs: [...refs], nextRef, draft: input.value,
+      camera: views.has(opened.entry)
+        ? { position: camera.position.clone(), target: controls.target.clone(), near: camera.near, far: camera.far }
+        : keptByTab.get(opened.entry)?.camera,
+    });
   }
+  const kept = keptByTab.get(file);
+  refs.length = 0;
+  refs.push(...(kept?.refs ?? []));
+  nextRef = kept?.nextRef ?? 1;
+  input.value = kept?.draft ?? "";
   const view = views.get(file);
   scene.remove(world);
   world = view?.world ?? new THREE.Group();
@@ -145,14 +154,15 @@ function showView(file) {
   model = view?.model ?? null;
   parts = view?.parts ?? new Map();
   stepMeshes = view?.stepMeshes ?? {};
-  if (view?.camera) {
-    camera.position.copy(view.camera.position);
-    controls.target.copy(view.camera.target);
-    camera.near = view.camera.near;
-    camera.far = view.camera.far;
+  if (kept?.camera) {
+    camera.position.copy(kept.camera.position);
+    controls.target.copy(kept.camera.target);
+    camera.near = kept.camera.near;
+    camera.far = kept.camera.far;
     camera.updateProjectionMatrix();
   }
   renderDesign();
+  renderRefs();
 }
 function dropView(file) {
   disposeTree(views.get(file).world);
@@ -683,7 +693,10 @@ function applyEntry(e) {
   if (e.entry !== opened.entry) showView(e.entry);
   opened = { ...opened, entry: e.entry, tabs: e.tabs };
   for (const file of [...views.keys()]) {
-    if (!e.tabs.some((t) => t.file === file)) dropView(file);
+    if (file !== e.entry && !e.tabs.find((t) => t.file === file)?.version) dropView(file);
+  }
+  for (const file of [...keptByTab.keys()]) {
+    if (!e.tabs.some((t) => t.file === file)) keptByTab.delete(file);
   }
   buildPending = e.building === e.entry && !e.built;
   input.disabled = $("mic").disabled = !e.entry;
@@ -706,6 +719,7 @@ function applyProject(e) {
   if (e.root !== opened.root) {
     showView(null);
     for (const file of [...views.keys()]) dropView(file);
+    keptByTab.clear();
     opened.entry = null;
   }
   opened = { ...opened, root: e.root, name: e.name, files: e.files, truncated: e.truncated };
@@ -915,6 +929,14 @@ function startListening() {
 }
 function stopListening() {
   if (listening) recognizer.stop();
+}
+/** Ends voice input without sending, keeping what was heard as the draft. */
+function cancelListening() {
+  if (!listening) return;
+  recognizer.onend = null;
+  recognizer.abort();
+  listening = false;
+  setMic(false);
 }
 $("mic").onclick = () => (listening ? stopListening() : startListening());
 

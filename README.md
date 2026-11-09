@@ -13,6 +13,8 @@ node src/cli.ts dev   # open the printed URL
 
 Open a project folder in the app, for example `examples/servo-bracket`, and pick a file. Click a face, hold Space and talk, or type. `D` draws, `F` fits, `Esc` clears.
 
+Settings live in `~/.vibecad/config.json`: `port`, `agent`, `model`, `keepMb`.
+
 ## A part
 
 Modeling files are named `*.cad.ts` and default-export what they show. A part with required params exports a preview, for example `export default () => Plate({ hole: 3 })`. Other `.ts` files are plain code.

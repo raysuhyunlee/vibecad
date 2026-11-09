@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AgentRunner, cliCommand } from "./agent.ts";
+import { CONFIG_FILE } from "./config.ts";
 import type { FaceInfo, Model } from "./eval.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -24,10 +25,12 @@ const MIME: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
 };
 
-/** An open file. It keeps its last good build until it is closed. */
+/** An open file. It keeps its last good build until it closes or the keep limit drops it. */
 interface Tab {
-  version: number;
+  version: number; // 0 while no build is kept
   stale: boolean; // source may have changed since the last build
+  leftAt: number; // when it was last on screen, to drop the longest unseen build first
+  size: number; // bytes of build output kept
   model?: Model;
   meshes?: string;
   error?: unknown;
@@ -76,6 +79,7 @@ function listFiles() {
 }
 
 export async function serve(o: {
+  keepBytes: number;
   port: number;
   agent: string;
   model?: string;
@@ -92,6 +96,7 @@ export async function serve(o: {
   let project: ReturnType<typeof listFiles> = { files: [], truncated: false };
   let watcher: FSWatcher | undefined;
   const tabs = new Map<string, Tab>();
+  let leaveCount = 0;
   let version = 0;
   let feedbackId = 0;
 
@@ -122,6 +127,20 @@ export async function serve(o: {
     log, running: agent.running, queued: queue.length, agent: o.agent,
   });
 
+  /** Drops the longest unseen builds over the limit. The tab on screen always keeps its build. */
+  const enforceKeepLimit = () => {
+    let total = 0;
+    for (const t of tabs.values()) total += t.size;
+    const droppable = [...tabs].filter(([file, t]) => t.model && file !== entry).sort(([, a], [, b]) => a.leftAt - b.leftAt);
+    for (const [, t] of droppable) {
+      if (total <= o.keepBytes) break;
+      total -= t.size;
+      t.model = t.meshes = undefined;
+      t.size = t.version = 0;
+      t.stale = true;
+    }
+  };
+
   // --- Builds ---------------------------------------------------------------
   let building: ChildProcess | undefined;
   let buildingFile: string | undefined;
@@ -144,14 +163,17 @@ export async function serve(o: {
       try {
         const r = JSON.parse(out);
         if (r.ok) {
-          tab.model = JSON.parse(readFileSync(`${PREVIEW_DIR}/model.json`, "utf8"));
+          const modelText = readFileSync(`${PREVIEW_DIR}/model.json`, "utf8");
+          tab.model = JSON.parse(modelText);
           tab.meshes = readFileSync(`${PREVIEW_DIR}/meshes.json`, "utf8");
+          tab.size = modelText.length + tab.meshes.length;
           tab.version = ++version;
           tab.error = undefined;
         } else tab.error = r.error;
       } catch {
         tab.error = { code: "BUILD_CRASHED", message: "The build process crashed. Run vibecad build for details." };
       }
+      enforceKeepLimit();
       emit({ type: "entry", ...entryState() });
     });
   };
@@ -161,11 +183,15 @@ export async function serve(o: {
   };
 
   // --- Project --------------------------------------------------------------
+  const newTab = (): Tab => ({ version: 0, stale: true, leftAt: 0, size: 0 });
   /** Shows a tab, opening it if needed. Only a tab that may be out of date builds. */
   const switchTo = (next: string | undefined) => {
     clearTimeout(timer);
+    const left = entry ? tabs.get(entry) : undefined;
+    if (left) left.leftAt = ++leaveCount;
     entry = next;
-    if (next && !tabs.has(next)) tabs.set(next, { version: 0, stale: true });
+    if (next && !tabs.has(next)) tabs.set(next, newTab());
+    enforceKeepLimit();
     if (buildingFile === next) return;
     building?.kill();
     building = buildingFile = undefined;
@@ -232,7 +258,7 @@ export async function serve(o: {
     watcher.on("error", () => {});
     for (const file of Array.isArray(wantedTabs) ? wantedTabs : []) {
       const path = projectEntry(file);
-      if (path) tabs.set(path, { version: 0, stale: true });
+      if (path) tabs.set(path, newTab());
     }
     switchTo(projectEntry(wanted) ?? project.files.find((f) => f === `main${ENTRY_SUFFIX}`));
     emit(hello());
@@ -435,7 +461,7 @@ export async function serve(o: {
   server.on("error", (e: NodeJS.ErrnoException) => {
     o.print({
       ok: false,
-      error: { code: e.code, message: e.code === "EADDRINUSE" ? `Port ${o.port} is in use. Pass another with --port.` : e.message },
+      error: { code: e.code, message: e.code === "EADDRINUSE" ? `Port ${o.port} is in use. Set another "port" in ${CONFIG_FILE}.` : e.message },
     });
     process.exit(1);
   });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +18,20 @@ writeFileSync(join(root, "parts/helper.ts"), "export const size = 1;\n");
 mkdirSync(join(root, "node_modules/x"), { recursive: true });
 writeFileSync(join(root, "node_modules/x/skip.cad.ts"), "export default 1;\n");
 
-const app = spawn(process.execPath, [CLI, "dev", "--port", String(PORT)], { cwd: bare, stdio: ["ignore", "pipe", "ignore"] });
+/** Starts the app with its own home folder, and so its own config file. */
+function startApp(config: unknown) {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-home-")));
+  mkdirSync(join(home, ".vibecad"));
+  writeFileSync(join(home, ".vibecad/config.json"), JSON.stringify(config));
+  const child = spawn(process.execPath, [CLI, "dev"], {
+    cwd: bare,
+    env: { ...process.env, HOME: home, USERPROFILE: home },
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  child.on("close", () => rmSync(home, { recursive: true, force: true }));
+  return child;
+}
+const app = startApp({ port: PORT });
 await new Promise((ok) => app.stdout.once("data", ok));
 after(() => {
   app.kill();
@@ -66,7 +79,7 @@ test("the app starts with nothing open", async () => {
 });
 
 test("dev refuses a file argument", async () => {
-  const child = spawn(process.execPath, [CLI, "dev", "main.cad.ts", "--port", "1"], { stdio: ["ignore", "pipe", "ignore"] });
+  const child = spawn(process.execPath, [CLI, "dev", "main.cad.ts"], { stdio: ["ignore", "pipe", "ignore"] });
   let out = "";
   child.stdout.on("data", (d) => (out += d));
   const code = await new Promise((ok) => child.on("close", ok));
@@ -155,4 +168,55 @@ test("closing a tab shows its neighbour and forgets its build", async () => {
   assert.equal(e.entry, "main.cad.ts");
   assert.equal(e.tabs.length, 1);
   assert.equal((await fetch(`${URL_BASE}/model?file=parts/other.cad.ts`)).status, 404);
+});
+
+test("the keep limit drops the longest unseen build, and that tab rebuilds when shown", async () => {
+  const small = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-keep-")));
+  const source = (name: string) => `import { box, part } from "vibecad";\nexport default part("${name}", () => ({ solid: box(1, 1, 1).named("a"), ports: {} }))({});\n`;
+  writeFileSync(join(small, "a.cad.ts"), source("A"));
+  writeFileSync(join(small, "b.cad.ts"), source("B"));
+  const port = PORT + 1;
+  const base = `http://127.0.0.1:${port}`;
+  const limited = startApp({ port, keepMb: 0 });
+  await new Promise((ok) => limited.stdout.once("data", ok));
+  try {
+    const postTo = (path: string, body: unknown) => fetch(base + path, { method: "POST", body: JSON.stringify(body) });
+    const shown = async (file: string) => {
+      for (let i = 0; i < 100; i++) {
+        const res = await fetch(`${base}/model?file=${file}`);
+        if (res.ok) return ((await res.json()) as any).model.parts[0].type;
+        await new Promise((ok) => setTimeout(ok, 100));
+      }
+      assert.fail(`${file} did not build`);
+    };
+    await postTo("/project", { path: small, entry: "a.cad.ts" });
+    assert.equal(await shown("a.cad.ts"), "A");
+    await postTo("/entry", { file: "b.cad.ts" });
+    assert.equal(await shown("b.cad.ts"), "B");
+    assert.equal((await fetch(`${base}/model?file=a.cad.ts`)).status, 404, "the unseen build is dropped");
+    await postTo("/entry", { file: "a.cad.ts" });
+    assert.equal(await shown("a.cad.ts"), "A");
+  } finally {
+    limited.kill();
+    rmSync(small, { recursive: true, force: true });
+  }
+});
+
+test("a bad setting stops the app and names the file", async () => {
+  for (const [config, text] of [[{ keepMb: -1 }, "keepMb"], [{ typo: 1 }, "typo"]] as const) {
+    const child = startApp(config);
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    assert.equal(await new Promise((ok) => child.on("close", ok)), 1);
+    const { error } = JSON.parse(out);
+    assert.equal(error.code, "BAD_CONFIG");
+    assert.match(error.message, new RegExp(text));
+    assert.match(error.message, /config\.json/);
+  }
+});
+
+test("settings are not CLI flags", () => {
+  const r = spawnSync(process.execPath, [CLI, "dev", "--port", "1"], { encoding: "utf8" });
+  assert.equal(r.status, 1);
+  assert.equal(JSON.parse(r.stdout).ok, false);
 });

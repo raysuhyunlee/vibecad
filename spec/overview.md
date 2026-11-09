@@ -11,6 +11,7 @@
 - `*.cad.ts` marks a modeling file and needs a default export, so every one can be built and viewed alone
 - everything is a function: built-in features and user functions have the same shape
 - agent first: every capability is a CLI command that prints JSON; errors carry code, source line and hint
+- the CLI takes actions; settings live in `~/.vibecad/config.json`
 - select by meaning, never by index: `edges.of("base.top").parallel("x")`
 - every face traces back to a name and a source line, through kernel history
 - git is the source of truth: source and lockfile are tracked, build output in `.vibecad/` is not
@@ -39,6 +40,12 @@
 
 - `build test query render export diff dev show`, see `vibecad --help`
 
+## settings
+
+- `~/.vibecad/config.json`, per user because the app starts before any project opens; read when the app starts
+- `port` (4173), `agent` (`claude`), `model` (agent default), `keepMb` (512)
+- every key is optional; an unknown key or a bad value stops the app with an error
+
 ## app and projects
 
 - `vibecad dev` starts the app with nothing open; it takes no file
@@ -47,8 +54,10 @@
 - one app serves one project: the server's working directory is the root, and builds, agents and `.vibecad/` resolve against it
 - the left panel lists the root's `*.cad.ts` files, skipping dot folders and `node_modules`, and updates as files change
 - selecting a file opens it in a tab; a project opens on `main.cad.ts` when it has one
-- a tab keeps its last good build and its camera until it closes, so switching tabs renders at once
-- switching tabs clears pins, since a message describes one model
+- a tab keeps its last good build until it closes, so switching tabs renders at once
+- kept builds have a limit, `keepMb`, measured on build output; over it, the longest unseen build is dropped, and that tab rebuilds when shown; the tab on screen is never dropped
+- pins, the draft message and the camera stay with their tab until it closes, even when its build is dropped; a pin goes when its face no longer exists
+- a message carries only the pins of the tab it is sent from
 - only the tab on screen builds; saving any `.ts` marks the others stale, and they rebuild behind the kept model when shown
 - preview builds write to `.vibecad/preview`, so an agent's own build in `.vibecad/out` cannot land in a tab
 - other `.ts` files are plain code: not listed, but saving one rebuilds
@@ -92,3 +101,5 @@
 - 2026-11-09: separate app start from loading; add project root and file browser
 - 2026-11-09: `*.cad.ts` is the modeling file standard, with a required default export
 - 2026-11-09: open files stay in tabs and keep their last build
+- 2026-11-09: limit kept builds; pins and drafts stay with their tab
+- 2026-11-09: move app settings from CLI flags to a config file

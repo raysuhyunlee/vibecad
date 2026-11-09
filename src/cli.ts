@@ -37,8 +37,8 @@ const USAGE = `vibecad <command> [entry=main.cad.ts]
                                  Write a multi-view PNG
   export [entry] [--part p] --out file.step|file.stl
   diff <git-ref> [entry]         Compare the model with another revision
-  dev [--port n] [--agent claude|codex] [--model id]
-                                 Start the app; open a project and file inside it
+  dev                            Start the app; open a project and file inside it.
+                                 Settings: ~/.vibecad/config.json
   show --part p [--face id] [--message text]
                                  Point at geometry in the open preview`;
 
@@ -120,9 +120,6 @@ async function main() {
       clearance: { type: "string" },
       out: { type: "string" },
       "out-dir": { type: "string" },
-      port: { type: "string" },
-      agent: { type: "string" },
-      model: { type: "string" },
       message: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
@@ -138,12 +135,13 @@ async function main() {
   const entry = rest[0] ?? "main.cad.ts";
   if (cmd === "dev") {
     if (rest[0]) throw new CadError("DEV_TAKES_NO_FILE", "dev takes no file", undefined, "Run vibecad dev, then open the project in the app");
+    const { loadConfig } = await import("./config.ts");
     const { serve } = await import("./server.ts");
+    const { keepMb, ...config } = loadConfig();
     return serve({
+      ...config,
       print,
-      port: Number(o.port ?? 4173),
-      agent: o.agent ?? "claude",
-      ...(o.model && { model: o.model }),
+      keepBytes: keepMb * 1024 * 1024,
     });
   }
   if (cmd === "show") return show(o.part, o.face, o.message);
