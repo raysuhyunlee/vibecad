@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  assembly, box, check, cylinder, edges, importStep, mate, minClearance, noCollision, part, port, revolute, slider,
+  assembly, box, check, cylinder, edges, extrude, importStep, mate, minClearance, noCollision, outerTangent, part, path, polygon, port,
+  revolute, revolve, roundedRect, slider,
 } from "../src/index.ts";
 import { build, CadError, getKernel } from "../src/eval.ts";
 import type { Vec3 } from "../src/lang.ts";
@@ -18,7 +19,7 @@ test("faces keep their names through booleans, and point at source", async () =>
   const bore = faces.find((f) => f.id === "bore.side");
   assert.equal(bore?.surface, "cylinder");
   assert.match(bore!.src.file, /core\.test\.ts$/);
-  assert.equal(bore!.src.line, 12);
+  assert.equal(bore!.src.line, 13);
   assert.ok(faces.find((f) => f.id === "base.top"));
   assert.equal(new Set(faces.map((f) => f.id)).size, faces.length);
 });
@@ -45,6 +46,128 @@ test("an empty selection reports the source line and the available faces", async
     assert.match(e.hint!, /b\.top/);
     return true;
   });
+});
+
+const facesOf = async (solid: ReturnType<typeof box>) => (await build(part("P", () => solid)())).model.parts[0]!;
+const closeTo = (a: number, b: number, tol = 1e-6) => assert.ok(Math.abs(a - b) < tol, `${a} is not ${b}`);
+
+test("a path names each wall after its segment, and unnamed walls by their place in the outline", async () => {
+  const outline = path([0, 0]).line([20, 0]).named("floor")
+    .arc([20, 5], [20, 10]).named("nose")
+    .line([0, 10])
+    .arc([0, 5], [0, 0], false).named("dent")
+    .close();
+  const { faces } = await facesOf(extrude(outline, 4).named("p"));
+  const at = (id: string) => faces.find((f) => f.id === id)!;
+  assert.deepEqual(faces.map((f) => f.id).sort(), ["p.bottom", "p.dent", "p.floor", "p.nose", "p.side[2]", "p.top"]);
+  assert.equal(at("p.floor").surface, "plane");
+  closeTo(at("p.floor").center[1], 0);
+  closeTo(at("p.side[2]").center[1], 10);
+  assert.equal(at("p.nose").surface, "cylinder");
+  assert.ok(at("p.nose").center[0] > 20);
+  assert.ok(at("p.dent").center[0] > 0);
+});
+
+test("side[i] follows the profile, whatever order the kernel returns faces in", async () => {
+  const { faces } = await facesOf(extrude(polygon([[0, 0], [10, 0], [10, 10], [0, 10]]), 2).named("p"));
+  const centers = [[5, 0], [10, 5], [5, 10], [0, 5]];
+  centers.forEach(([x, y], i) => {
+    const f = faces.find((g) => g.id === `p.side[${i}]`)!;
+    closeTo(f.center[0], x!);
+    closeTo(f.center[1], y!);
+  });
+});
+
+test("a named wall selects its edges for a chamfer, which the kernel carries along tangent edges", async () => {
+  const chamfered = async (center: [number, number]) => {
+    const outline = path([0, 0]).line([20, 0]).arc(center, [20, 10]).named("nose").line([0, 10]).close();
+    return facesOf(extrude(outline, 4).named("p").chamfer(1, edges.between("p.nose", "p.top")).named("c"));
+  };
+  assert.equal((await chamfered([15, 5])).faces.filter((f) => f.name === "c").length, 1);
+  assert.equal((await chamfered([20, 5])).faces.filter((f) => f.name === "c").length, 3);
+});
+
+test("round matches an exact rounded rectangle, and takes a name", async () => {
+  const [x, y, r] = [10, 5, 2];
+  const outline = path([-x, -y]).line([x, -y]).round(r).line([x, y]).round(r).named("corner")
+    .line([-x, y]).round(r).line([-x, -y]).round(r).close();
+  const rounded = await facesOf(extrude(outline, 3).named("p"));
+  const exact = await facesOf(extrude(roundedRect(2 * x, 2 * y, r), 3));
+  closeTo(rounded.volume, exact.volume);
+  assert.equal(rounded.faces.filter((f) => f.surface === "cylinder").length, 4);
+  assert.ok(rounded.faces.find((f) => f.id === "p.corner")!.center[1] > 0);
+});
+
+test("round and tangent steps leave the outline connected and smooth, on lines and arcs", async () => {
+  const outline = path([0, 0]).line([30, 0]).round(3)
+    .line([30, 20]).round(4)
+    .arc([15, 10], [0, 20]).round(2)
+    .line([-5, 25]).forward(5).tangentArc([-12, 30]).round(1)
+    .line([-20, 10]).close();
+  const { segments } = outline;
+  assert.equal(segments.length, 12);
+  // Ends as [point, direction]. An arc is stored counter-clockwise, so only the direction's line is compared.
+  const ends = segments.map((s) => {
+    if (s.t === "line") {
+      const d = [s.b[0] - s.a[0], s.b[1] - s.a[1]];
+      return [{ p: s.a, d }, { p: s.b, d }];
+    }
+    if (s.t !== "arc") throw new Error("a path has no full circle segment here");
+    return [s.a0, s.a1].map((t) => ({
+      p: [s.c[0] + s.r * Math.cos(t), s.c[1] + s.r * Math.sin(t)],
+      d: [-Math.sin(t), Math.cos(t)],
+    }));
+  });
+  const parallel = (u: number[], v: number[]) => Math.abs(u[0]! * v[1]! - u[1]! * v[0]!) / (Math.hypot(u[0]!, u[1]!) * Math.hypot(v[0]!, v[1]!)) < 1e-6;
+  ends.forEach((own, i) => {
+    const next = ends[(i + 1) % ends.length]!;
+    const meets = own.flatMap((a) => next.filter((b) => Math.hypot(a.p[0]! - b.p[0]!, a.p[1]! - b.p[1]!) < 1e-9).map((b) => [a, b] as const));
+    assert.equal(meets.length, 1, `segment ${i} does not meet the next`);
+    // Only the two unrounded joints around the closing line may have a corner.
+    const [a, b] = meets[0]!;
+    if (i < 10) assert.ok(parallel(a.d, b.d), `joint after segment ${i} has a corner`);
+  });
+  assert.ok((await facesOf(extrude(outline, 2))).volume > 0);
+});
+
+test("a clockwise path, rounded against an arc, builds the right solid", async () => {
+  const outline = path([0, 0]).line([0, 20]).line([30, 20]).arc([25, 10], [30, 0], false).round(2).close();
+  const { volume, bbox } = await facesOf(extrude(outline, 1));
+  assert.ok(volume > 600 && volume < 600 + 150, `${volume}`);
+  closeTo(bbox.max[0], 25 + Math.hypot(5, 10));
+});
+
+test("outerTangent touches both circles at a right angle to the radius", () => {
+  for (const side of ["left", "right"] as const) {
+    const [a, b] = outerTangent([0, 0], 5, [20, 3], 2, side);
+    const d = [b[0] - a[0], b[1] - a[1]];
+    closeTo(Math.hypot(...a), 5);
+    closeTo(Math.hypot(b[0] - 20, b[1] - 3), 2);
+    closeTo(a[0] * d[0]! + a[1] * d[1]!, 0);
+    closeTo((b[0] - 20) * d[0]! + (b[1] - 3) * d[1]!, 0);
+    const cross = d[0]! * a[1] - d[1]! * a[0];
+    assert.equal(cross > 0, side === "left");
+  }
+});
+
+test("a revolved path names its walls and its caps", async () => {
+  const outline = path([5, 0]).line([10, 0]).named("outer").line([10, 8]).line([5, 8]).close();
+  const half = await facesOf(revolve(outline, "y", 180).named("r"));
+  const ids = half.faces.map((f) => f.id).sort();
+  assert.deepEqual(ids, ["r.end", "r.outer", "r.side[1]", "r.side[2]", "r.side[3]", "r.start"]);
+  const full = await facesOf(revolve(outline, "y").named("r"));
+  assert.ok(!full.faces.some((f) => f.id === "r.start"));
+  assert.ok(full.faces.some((f) => f.id === "r.outer"));
+});
+
+test("a path reports bad geometry where it was written", () => {
+  assert.throws(() => path([0, 0]).line([10, 0]).arc([10, 5], [10, 9]), /arc end/);
+  assert.throws(() => path([0, 0]).line([10, 0]).round(30).line([10, 10]).close(), /does not fit/);
+  assert.throws(() => path([0, 0]).line([10, 0]).round(1).forward(5).line([0, 5]).close(), /no corner to round/);
+  assert.throws(() => path([0, 0]).line([10, 0]).round(6).line([10, 8]).round(6).line([0, 8]).close(), /overlap|does not fit/);
+  assert.throws(() => path([0, 0]).tangentArc([1, 1]), /tangent/);
+  assert.throws(() => path([0, 0]).line([5, 0]).tangentArc([9, 0]), /straight ahead/);
+  assert.throws(() => path([0, 0]).line([5, 0]).named("top"), /bad segment name/);
 });
 
 test("mates place parts, nest through assemblies, and run checks", async () => {

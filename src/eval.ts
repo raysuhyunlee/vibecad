@@ -1,7 +1,7 @@
 // Evaluates the feature graph on OCCT and tracks every face back to its source.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { BooleanOp, OcctKernel, type ShapeHandle } from "occt-wasm";
+import { BooleanOp, OcctKernel, type EvolutionData, type ShapeHandle } from "occt-wasm";
 import {
   EdgeSel, Instance, Solid,
   type CheckDef, type JointDef, type MateDef, type PortDef, type PortRef, type Profile, type Query, type Src, type Vec3,
@@ -186,9 +186,6 @@ class Evaluator {
     const tags = new Map<number, Tag>();
     const com = tuple(k.getCenterOfMass(shape));
     const fs = this.faces(shape);
-    let sides = 0;
-    const multiSide = n.op === "extrude" || n.op === "revolve";
-    const sideCount = fs.filter((f) => !this.isCap(n, f)).length;
     for (const f of fs) {
       const c = tuple(k.getSurfaceCenterOfMass(f));
       let face: string;
@@ -199,8 +196,6 @@ class Evaluator {
         face = [pos ? "right" : "left", pos ? "back" : "front", pos ? "top" : "bottom"][axis]!;
       } else if (this.isCap(n, f)) {
         face = c[2] > com[2] ? "top" : "bottom";
-      } else if (multiSide && sideCount > 1) {
-        face = `side[${sides++}]`;
       } else {
         face = "side";
       }
@@ -210,11 +205,40 @@ class Evaluator {
   }
 
   isCap(n: Solid, f: ShapeHandle) {
-    if (n.op === "cylinder" || n.op === "cone") return this.k.surfaceType(f) === "plane";
-    if (n.op !== "extrude") return false;
-    if (this.k.surfaceType(f) !== "plane") return false;
-    const b = this.k.getBoundingBox(f);
-    return Math.abs(b.zmax - b.zmin) < 1e-6;
+    return (n.op === "cylinder" || n.op === "cone") && this.k.surfaceType(f) === "plane";
+  }
+
+  /** Tags a swept profile through kernel history: each wall comes from one segment, so it takes that segment's name. */
+  swept(n: Solid, p: Profile, caps: [string, string], sweep: (face: ShapeHandle) => EvolutionData): Evaluated {
+    const k = this.k;
+    const face = this.face(p);
+    const ev = sweep(face);
+    const tags = new Map<number, Tag>();
+    const tag = (h: number, name: string) => tags.set(h, { name: `${n.name}.${name}`, src: n.src });
+    for (const h of ev.firstShape) tag(h, caps[0]);
+    for (const h of ev.lastShape) tag(h, caps[1]);
+    const segOf = new Map(k.getSubShapes(face, "edge").map((e) => [this.hash(e), this.segmentOf(e, p)]));
+    for (let i = 0; i < ev.edgeGenerated.length; ) {
+      const seg = segOf.get(ev.edgeGenerated[i]!);
+      const count = ev.edgeGenerated[i + 1]!;
+      if (seg !== undefined) {
+        const name = p.segments[seg]!.name ?? (p.segments.length > 1 ? `side[${seg}]` : "side");
+        for (let j = 0; j < count; j++) tag(ev.edgeGenerated[i + 2 + j]!, name);
+      }
+      i += 2 + count;
+    }
+    return { shape: ev.result, tags };
+  }
+
+  /** The profile segment an edge of its face came from: the one whose midpoint lies on it. */
+  segmentOf(edge: ShapeHandle, p: Profile) {
+    let best = 0, bestDistance = Infinity;
+    p.segments.forEach((s, i) => {
+      const mid = segmentMidpoint(s);
+      const d = this.k.distanceBetween(edge, this.k.makeVertex(mid[0], mid[1], 0));
+      if (d < bestDistance) [best, bestDistance] = [i, d];
+    });
+    return best;
   }
 
   hashes(inputs: Evaluated[]) {
@@ -249,12 +273,11 @@ class Evaluator {
       case "sphere":
         return this.primitive(n, k.makeSphere(a.radius));
       case "extrude":
-        return this.primitive(n, k.extrude(this.face(a.profile), 0, 0, a.height));
+        return this.swept(n, a.profile, [a.height > 0 ? "bottom" : "top", a.height > 0 ? "top" : "bottom"], (f) =>
+          k.extrudeWithHistory(f, 0, 0, a.height, [], HASH_BOUND));
       case "revolve":
-        return this.primitive(
-          n,
-          k.revolve(this.face(a.profile), { point: vec([0, 0, 0]), direction: vec(a.axis) }, a.degrees * DEG),
-        );
+        return this.swept(n, a.profile, ["start", "end"], (f) =>
+          k.revolveWithHistory(f, { point: vec([0, 0, 0]), direction: vec(a.axis) }, a.degrees * DEG, [], HASH_BOUND));
       case "importStep": {
         if (!existsSync(a.path)) {
           throw new CadError("STEP_NOT_FOUND", `No STEP file at ${a.path}`, n.src, "The path is relative to the source file that calls importStep.");
@@ -373,6 +396,12 @@ class Evaluator {
       `Available faces: ${names.join(", ")}`,
     );
   }
+}
+
+function segmentMidpoint(s: Profile["segments"][number]): [number, number] {
+  if (s.t === "line") return [(s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2];
+  const angle = s.t === "arc" ? (s.a0 + s.a1) / 2 : 0;
+  return [s.c[0] + s.r * Math.cos(angle), s.c[1] + s.r * Math.sin(angle)];
 }
 
 /** "mount" matches "mount[2].side"; "mount[2]" and "mount[2].side" match themselves. */

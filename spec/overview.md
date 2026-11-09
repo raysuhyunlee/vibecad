@@ -33,7 +33,11 @@
 - an imported file has no feature names, so its faces are `<feature>.face[i]` in file order; replacing the file can renumber them, so prefer selecting the whole feature, `edges.of("motor").curve("circle")`
 - STEP files are tracked in git, because `diff` builds revisions from git; saving one in the project rebuilds
 - a STEP file is also an entry: every command and the app open it directly as one part named after the file, with no ports and no TypeScript source
-- profiles: `polygon rect circle roundedRect`
+- profiles: `polygon rect circle roundedRect path`
+- `path(start)` builds a closed outline: `line(to) arc(center, to, ccw) forward(length) tangentArc(to) round(r) named(name) close()`
+- `round(r)` rounds the corner at the current point, against lines or arcs; to round the start, end on it with an explicit `line(start)`
+- bad geometry stops at the call: an arc end off its circle, a round that does not fit or has no corner
+- `outerTangent(c1, r1, c2, r2, side)` gives the touch points of a line tangent to two circles
 - features: `union cut intersect fillet chamfer shell translate rotate mirror`
 - structure: `part assembly port mate revolute slider named`
 - links: mates and joints join parts into one tree, growing from the first part; a closed loop is `OVER_CONSTRAINED`
@@ -45,6 +49,9 @@
 - sweeps: `noCollision(a, b, { joint, steps })` samples a joint's range, only in `vibecad test`, and reports the first failing value; collisions between samples can be missed
 - a check reads other poses with `q.at(joint, value)`
 - face names: `<feature>.<face>`, for example `mount[2].side`; a split face gets `~2`
+- a swept profile's wall takes its segment's name, or else `side[i]`, its place in the outline counting rounds; an outline of one segment gives `side`
+- caps are `top` and `bottom` on an extrude, `start` and `end` on a partial revolve; these and `side` are reserved as segment names
+- `fillet` and `chamfer` follow the kernel: they carry on along edges tangent to the selection
 
 ## cli
 
@@ -100,6 +107,7 @@
 
 ## status
 
+- modeling priority, draft: (1) fillet runout; (2) sketches on any plane; (3) sketch offset; (4) spline; (5) constraint solver
 - wip: closed-loop linkages and more joint kinds (cylindrical, ball, planar)
 - wip: drawn strokes stay in place when a joint moves; pins follow their part
 - wip: sketch constraint solver, sweep, loft, draft, drawings, sheet metal
@@ -121,3 +129,4 @@
 - 2026-11-09: import STEP files as solids
 - 2026-11-09: open STEP files directly as entries
 - 2026-11-09: add revolute and slider joints, poses, and range sweeps in `test`
+- 2026-11-09: add the path builder; walls take their segment's name through kernel history

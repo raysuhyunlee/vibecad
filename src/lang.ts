@@ -61,10 +61,12 @@ export const edges = new EdgeSel();
 // --- Profiles ---------------------------------------------------------------
 
 type Pt = [number, number];
-export type Segment =
+/** `name` becomes the name of the wall this segment sweeps into. */
+export type Segment = (
   | { t: "line"; a: Pt; b: Pt }
   | { t: "arc"; c: Pt; r: number; a0: number; a1: number }
-  | { t: "circle"; c: Pt; r: number };
+  | { t: "circle"; c: Pt; r: number }
+) & { name?: string };
 /** A closed 2D outline on the XY plane. */
 export interface Profile {
   segments: Segment[];
@@ -95,6 +97,231 @@ export function roundedRect(w: number, h: number, r: number): Profile {
       { t: "arc", c: [-x + r, -y + r], r, a0: 2 * q, a1: 3 * q },
     ],
   };
+}
+
+// A path segment while building. An arc keeps its direction as a signed sweep.
+type PathLine = { t: "line"; a: Pt; b: Pt; name?: string };
+type PathArc = { t: "arc"; c: Pt; r: number; from: number; sweep: number; name?: string };
+type PathSeg = PathLine | PathArc;
+type Round = { r: number; name?: string };
+
+const TOL = 1e-7; // OCCT's own wire tolerance, mm
+const TAU = 2 * Math.PI;
+const RESERVED_FACES = ["top", "bottom", "start", "end", "side"];
+
+const dist = (a: Pt, b: Pt) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+const onCircle = (c: Pt, r: number, angle: number): Pt => [c[0] + r * Math.cos(angle), c[1] + r * Math.sin(angle)];
+const angleOf = (c: Pt, p: Pt) => Math.atan2(p[1] - c[1], p[0] - c[0]);
+
+function segPoint(s: PathSeg, t: number): Pt {
+  if (s.t === "line") return [s.a[0] + (s.b[0] - s.a[0]) * t, s.a[1] + (s.b[1] - s.a[1]) * t];
+  return onCircle(s.c, s.r, s.from + s.sweep * t);
+}
+/** Unit travel direction at parameter t. */
+function segDir(s: PathSeg, t: number): Pt {
+  if (s.t === "line") {
+    const l = dist(s.a, s.b);
+    return [(s.b[0] - s.a[0]) / l, (s.b[1] - s.a[1]) / l];
+  }
+  const angle = s.from + s.sweep * t, sign = Math.sign(s.sweep);
+  return [-sign * Math.sin(angle), sign * Math.cos(angle)];
+}
+/** The parameter of the point on s nearest q, or undefined when it falls outside s. */
+function segParam(s: PathSeg, q: Pt): number | undefined {
+  let t: number;
+  if (s.t === "line") {
+    const l = dist(s.a, s.b), d = segDir(s, 0);
+    t = ((q[0] - s.a[0]) * d[0] + (q[1] - s.a[1]) * d[1]) / l;
+  } else {
+    const along = (Math.sign(s.sweep) * (angleOf(s.c, q) - s.from)) % TAU;
+    const a = along < 0 ? along + TAU : along;
+    const size = Math.abs(s.sweep);
+    t = a > size && a > (size + TAU) / 2 ? (a - TAU) / size : a / size;
+  }
+  const eps = 1e-9;
+  if (t < -eps || t > 1 + eps) return undefined;
+  return Math.min(1, Math.max(0, t));
+}
+
+type Curve = { p: Pt; d: Pt } | { c: Pt; r: number };
+
+/** The curve r away from s, on its left (side 1) or right (side -1). */
+function offsetCurve(s: PathSeg, r: number, side: number): Curve | undefined {
+  if (s.t === "line") {
+    const d = segDir(s, 0);
+    return { p: [s.a[0] - d[1] * r * side, s.a[1] + d[0] * r * side], d };
+  }
+  const radius = s.r - side * Math.sign(s.sweep) * r;
+  return radius > 0 ? { c: s.c, r: radius } : undefined;
+}
+function intersect(a: Curve, b: Curve): Pt[] {
+  if ("p" in a && "p" in b) {
+    const cross = a.d[0] * b.d[1] - a.d[1] * b.d[0];
+    if (Math.abs(cross) < 1e-12) return [];
+    const t = ((b.p[0] - a.p[0]) * b.d[1] - (b.p[1] - a.p[1]) * b.d[0]) / cross;
+    return [[a.p[0] + a.d[0] * t, a.p[1] + a.d[1] * t]];
+  }
+  if ("p" in a) return intersect(b, a);
+  if ("p" in b) {
+    const fx = b.p[0] - a.c[0], fy = b.p[1] - a.c[1];
+    const along = fx * b.d[0] + fy * b.d[1];
+    const h2 = a.r ** 2 - (fx ** 2 + fy ** 2 - along ** 2);
+    if (h2 < 0) return [];
+    const h = Math.sqrt(h2);
+    return [-along - h, -along + h].map((t) => [b.p[0] + b.d[0] * t, b.p[1] + b.d[1] * t]);
+  }
+  const d = dist(a.c, b.c);
+  if (d < 1e-12) return [];
+  const x = (d ** 2 + a.r ** 2 - b.r ** 2) / (2 * d);
+  const h2 = a.r ** 2 - x ** 2;
+  if (h2 < 0) return [];
+  const h = Math.sqrt(h2), ux = (b.c[0] - a.c[0]) / d, uy = (b.c[1] - a.c[1]) / d;
+  const m: Pt = [a.c[0] + ux * x, a.c[1] + uy * x];
+  return [[m[0] - uy * h, m[1] + ux * h], [m[0] + uy * h, m[1] - ux * h]];
+}
+
+/** Builds a closed outline from lines and arcs. Each step continues from the last point. */
+export class Path {
+  readonly #start: Pt;
+  readonly #segs: PathSeg[] = [];
+  /** Corner rounds, by the index of the segment after the corner. */
+  readonly #rounds = new Map<number, Round>();
+  #at: Pt;
+  #last: { name?: string } | undefined;
+
+  constructor(start: Pt) {
+    this.#start = start;
+    this.#at = start;
+  }
+
+  #push(s: PathSeg, end: Pt) {
+    this.#segs.push(s);
+    this.#at = end;
+    this.#last = s;
+    return this;
+  }
+  #dir(step: string): Pt {
+    const prev = this.#segs.at(-1);
+    if (!prev) throw new Error(`path: ${step} needs a segment before it to be tangent to`);
+    return segDir(prev, 1);
+  }
+
+  /** A straight line to a point. */
+  line(to: Pt) {
+    if (dist(this.#at, to) < TOL) throw new Error(`path: line to [${to}] has no length`);
+    return this.#push({ t: "line", a: this.#at, b: to }, to);
+  }
+  /** A line continuing tangent to the previous segment. */
+  forward(length: number) {
+    const d = this.#dir("forward");
+    return this.line([this.#at[0] + d[0] * length, this.#at[1] + d[1] * length]);
+  }
+  /** An arc around c to a point, counter-clockwise unless ccw is false. Ending where it starts makes a full circle. */
+  arc(c: Pt, to: Pt, ccw = true) {
+    const r = dist(c, this.#at);
+    if (r < TOL) throw new Error(`path: arc center [${c}] is on the start point`);
+    if (Math.abs(dist(c, to) - r) > 1e-6) {
+      throw new Error(`path: arc end [${to}] is ${dist(c, to)} from center [${c}], but the start is ${r} from it`);
+    }
+    const from = angleOf(c, this.#at), end = angleOf(c, to), sign = ccw ? 1 : -1;
+    let size = (sign * (end - from)) % TAU;
+    if (size < 0) size += TAU;
+    if (size < 1e-9 || TAU - size < 1e-9) size = TAU;
+    return this.#push({ t: "arc", c, r, from, sweep: sign * size }, onCircle(c, r, end));
+  }
+  /** An arc to a point, tangent to the previous segment. */
+  tangentArc(to: Pt) {
+    const d = this.#dir("tangentArc");
+    const v: Pt = [to[0] - this.#at[0], to[1] - this.#at[1]];
+    const n: Pt = [-d[1], d[0]];
+    const across = v[0] * n[0] + v[1] * n[1];
+    if (Math.abs(across) < 1e-9) throw new Error(`path: [${to}] lies straight ahead, so tangentArc has no curve; use line`);
+    const signed = (v[0] ** 2 + v[1] ** 2) / (2 * across);
+    return this.arc([this.#at[0] + n[0] * signed, this.#at[1] + n[1] * signed], to, signed > 0);
+  }
+  /** Rounds the corner at the current point, between the previous and the next segment. */
+  round(r: number) {
+    if (this.#segs.length === 0) throw new Error("path: round needs a segment before it");
+    if (!(r > 0)) throw new Error(`path: round radius must be positive, got ${r}`);
+    const round: Round = { r };
+    this.#rounds.set(this.#segs.length, round);
+    this.#last = round;
+    return this;
+  }
+  /** Names the last segment or round. Its wall becomes "<feature>.<name>". */
+  named(name: string) {
+    if (!this.#last) throw new Error("path: named needs a segment before it");
+    if (!/^[A-Za-z_][\w-]*$/.test(name) || RESERVED_FACES.includes(name)) {
+      throw new Error(`path: bad segment name "${name}". Use a plain word other than ${RESERVED_FACES.join(", ")}`);
+    }
+    this.#last.name = name;
+    return this;
+  }
+  /** Closes the outline, with a line back to the start if it is not there yet. */
+  close(): Profile {
+    if (this.#segs.length === 0) throw new Error("path: close needs a segment before it");
+    if (dist(this.#at, this.#start) >= TOL) this.line(this.#start);
+    return { segments: resolveRounds(this.#segs, this.#rounds) };
+  }
+}
+
+/** Starts an outline at a point. See Path. */
+export function path(start: Pt) {
+  return new Path(start);
+}
+
+/** Trims the segments at each round, and emits the outline in order. */
+function resolveRounds(segs: PathSeg[], rounds: Map<number, Round>): Segment[] {
+  const n = segs.length;
+  const starts: number[] = segs.map(() => 0), ends: number[] = segs.map(() => 1);
+  const arcs = new Map<number, PathArc>();
+  for (const [at, round] of rounds) {
+    const i = at % n, prevI = (i + n - 1) % n;
+    const prev = segs[prevI]!, next = segs[i]!;
+    const u = segDir(prev, 1), v = segDir(next, 0);
+    const turn = u[0] * v[1] - u[1] * v[0];
+    const corner = segPoint(next, 0);
+    if (prevI === i || Math.abs(turn) < 1e-9) {
+      throw new Error(`path: no corner to round at [${corner}]; the segments there are already tangent`);
+    }
+    const side = Math.sign(turn);
+    const a = offsetCurve(prev, round.r, side), b = offsetCurve(next, round.r, side);
+    const fits = (a && b ? intersect(a, b) : []).flatMap((c) => {
+      const t0 = segParam(prev, c), t1 = segParam(next, c);
+      return t0 === undefined || t1 === undefined ? [] : [{ c, t0, t1 }];
+    }).sort((p, q) => dist(p.c, corner) - dist(q.c, corner));
+    const fit = fits[0];
+    if (!fit) throw new Error(`path: round radius ${round.r} does not fit the corner at [${corner}]`);
+    ends[prevI] = fit.t0;
+    starts[i] = fit.t1;
+    const from = angleOf(fit.c, segPoint(prev, fit.t0));
+    let size = (side * (angleOf(fit.c, segPoint(next, fit.t1)) - from)) % TAU;
+    if (size < 0) size += TAU;
+    arcs.set(i, { t: "arc", c: fit.c, r: round.r, from, sweep: side * size, name: round.name });
+  }
+  const out: Segment[] = [];
+  segs.forEach((s, i) => {
+    const arc = arcs.get(i);
+    if (arc) out.push(toSegment(arc));
+    const t0 = starts[i]!, t1 = ends[i]!;
+    if (t0 > t1 + 1e-9) throw new Error(`path: rounds overlap on the segment from [${segPoint(s, 0)}] to [${segPoint(s, 1)}]`);
+    if (t1 - t0 < 1e-9) return; // Two rounds used up this segment.
+    if (s.t === "line") out.push({ t: "line", a: segPoint(s, t0), b: segPoint(s, t1), name: s.name });
+    else out.push(toSegment({ ...s, from: s.from + s.sweep * t0, sweep: s.sweep * (t1 - t0) }));
+  });
+  return out;
+}
+function toSegment(s: PathArc): Segment {
+  const [a0, a1] = s.sweep > 0 ? [s.from, s.from + s.sweep] : [s.from + s.sweep, s.from];
+  return { t: "arc", c: s.c, r: s.r, a0, a1, name: s.name };
+}
+
+/** Touch points of the line tangent to two circles on the same side, left or right of travel from c1 to c2. */
+export function outerTangent(c1: Pt, r1: number, c2: Pt, r2: number, side: "left" | "right" = "right"): [Pt, Pt] {
+  const d = dist(c1, c2);
+  if (d <= Math.abs(r1 - r2)) throw new Error("outerTangent: one circle is inside the other");
+  const a = angleOf(c1, c2) + (side === "left" ? 1 : -1) * Math.acos((r1 - r2) / d);
+  return [onCircle(c1, r1, a), onCircle(c2, r2, a)];
 }
 
 // --- Solids: the feature graph ----------------------------------------------
@@ -195,10 +422,11 @@ export function cone(r1: number, r2: number, height: number): Solid {
 export function sphere(radius: number): Solid {
   return new Solid("sphere", { radius }, []);
 }
-/** Faces: top, bottom, side[i]. Extrudes along +Z from z=0. */
+/** Faces: top, bottom, and per profile segment its name or side[i]. Extrudes along +Z from z=0. */
 export function extrude(profile: Profile, height: number): Solid {
   return new Solid("extrude", { profile, height }, []);
 }
+/** Faces: start, end when not a full turn, and per profile segment its name or side[i]. */
 export function revolve(profile: Profile, axis: Axis = "y", degrees = 360): Solid {
   return new Solid("revolve", { profile, axis: toVec(axis), degrees }, []);
 }
