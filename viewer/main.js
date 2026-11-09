@@ -38,7 +38,8 @@ const flashMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: 
 
 // --- State ------------------------------------------------------------------
 let model = null;
-let parts = new Map(); // path -> { info, mesh, edges, groups, geometry }
+let parts = new Map(); // path -> { info, mesh, edges, groups, geometry, matrix }
+let pose = {}; // joint path -> value the person set; kept by tab, never written to the source
 let stepMeshes = {};
 let selectedPart = null;
 let previewStep = null;
@@ -54,7 +55,7 @@ let running = false;
 let hoverKey = "";
 let opened = { root: null, entry: null, files: [], truncated: false, tabs: [] };
 const views = new Map(); // open file -> its kept build: { world, model, parts, stepMeshes, version }
-const keptByTab = new Map(); // open file -> what outlives its build: { refs, nextRef, draft, camera }
+const keptByTab = new Map(); // open file -> what outlives its build: { refs, nextRef, draft, pose, camera }
 let buildPending = false;
 let loadToken = 0;
 const collapsed = new Set();
@@ -70,6 +71,12 @@ function geometryOf(m) {
   g.setAttribute("normal", new THREE.BufferAttribute(decode(m.normals, Float32Array), 3));
   g.setIndex(new THREE.BufferAttribute(decode(m.indices, Uint32Array), 1));
   return g;
+}
+/** Puts an object on a part's pose matrix, which applyPose changes in place. */
+function bindPose(o, matrix) {
+  o.matrixAutoUpdate = false;
+  o.matrix = matrix;
+  o.matrixWorldNeedsUpdate = true;
 }
 function disposeTree(o) {
   o.traverse((c) => c.geometry?.dispose());
@@ -101,10 +108,13 @@ async function loadModel() {
     const mesh = new THREE.Mesh(geometry, partMaterial);
     mesh.userData.path = m.path;
     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 28), edgeMaterial);
-    const part = { info, mesh, edges, geometry, groups: m.faceGroups };
+    const part = { info, mesh, edges, geometry, groups: m.faceGroups, matrix: new THREE.Matrix4() };
+    bindPose(mesh, part.matrix);
+    bindPose(edges, part.matrix);
     world.add(mesh, edges);
     parts.set(m.path, part);
   }
+  applyPose();
 
   if (!views.has(file) && !keptByTab.get(file)?.camera) fit();
   views.set(file, { world, model, parts, stepMeshes, version: data.version });
@@ -136,7 +146,7 @@ function showView(file) {
 
   if (opened.entry) {
     keptByTab.set(opened.entry, {
-      refs: [...refs], nextRef, draft: input.value,
+      refs: [...refs], nextRef, draft: input.value, pose,
       camera: views.has(opened.entry)
         ? { position: camera.position.clone(), target: controls.target.clone(), near: camera.near, far: camera.far }
         : keptByTab.get(opened.entry)?.camera,
@@ -147,6 +157,7 @@ function showView(file) {
   refs.push(...(kept?.refs ?? []));
   nextRef = kept?.nextRef ?? 1;
   input.value = kept?.draft ?? "";
+  pose = kept?.pose ?? {};
   const view = views.get(file);
   scene.remove(world);
   world = view?.world ?? new THREE.Group();
@@ -154,6 +165,7 @@ function showView(file) {
   model = view?.model ?? null;
   parts = view?.parts ?? new Map();
   stepMeshes = view?.stepMeshes ?? {};
+  applyPose();
   if (kept?.camera) {
     camera.position.copy(kept.camera.position);
     controls.target.copy(kept.camera.target);
@@ -206,6 +218,7 @@ function overlayFor(path, faceId, material) {
   g.setIndex(idx);
   const m = new THREE.Mesh(g, material);
   m.renderOrder = 2;
+  bindPose(m, part.matrix);
   world.add(m);
   return m;
 }
@@ -290,6 +303,7 @@ function hover(e) {
 function addPin(hit) {
   const r = {
     n: nextRef++, part: hit.part, face: hit.face.id, point: hit.point.clone(),
+    base: hit.point.clone().applyMatrix4(parts.get(hit.part).matrix.clone().invert()),
     overlay: overlayFor(hit.part, hit.face.id, pickedMaterial),
   };
   refs.push(r);
@@ -463,7 +477,95 @@ function screenshot() {
   return out.toDataURL("image/png");
 }
 
-// --- Design panel: parts, feature history, source, checks -------------------
+// --- Joints: the model moves without a rebuild ------------------------------
+const jointValue = (j) => Math.min(j.max, Math.max(j.min, pose[j.path] ?? j.value));
+const jointUnit = (j) => (j.kind === "revolute" ? "°" : "mm");
+const jointNumber = (v) => String(Math.round(v * 100) / 100);
+
+/** Meshes hold the build's pose. Each part gets the joints that carry it, outermost first. */
+function applyPose() {
+  for (const p of parts.values()) p.matrix.identity();
+  const pivot = new THREE.Matrix4(), turn = new THREE.Matrix4(), step = new THREE.Matrix4();
+  for (const j of model?.joints ?? []) {
+    const delta = jointValue(j) - j.value;
+    if (delta === 0) continue;
+    const [ox, oy, oz] = j.origin, axis = new THREE.Vector3(...j.axis);
+    if (j.kind === "revolute") {
+      step.makeTranslation(ox, oy, oz)
+        .multiply(turn.makeRotationAxis(axis, THREE.MathUtils.degToRad(delta)))
+        .multiply(pivot.makeTranslation(-ox, -oy, -oz));
+    } else step.makeTranslation(axis.x * delta, axis.y * delta, axis.z * delta);
+    for (const path of j.moves) parts.get(path).matrix.multiply(step);
+  }
+  world.updateMatrixWorld(true);
+  for (const r of refs) {
+    const part = r.base && parts.get(r.part);
+    if (part) r.point.copy(r.base).applyMatrix4(part.matrix);
+  }
+}
+/** The joints the person moved away from the source, for the agent. */
+function movedJoints() {
+  const moved = (model?.joints ?? []).filter((j) => jointValue(j) !== j.value);
+  return Object.fromEntries(moved.map((j) => [j.path, jointValue(j)]));
+}
+function jointRow(j) {
+  const el = document.createElement("div");
+  el.className = "joint";
+  const head = document.createElement("div");
+  head.className = "joint-head";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = j.path;
+  name.title = j.path;
+  const number = document.createElement("input");
+  number.type = "number";
+  number.step = "any";
+  number.min = j.min;
+  number.max = j.max;
+  number.setAttribute("aria-label", `${j.path} value`);
+  const unit = document.createElement("span");
+  unit.className = "dim";
+  unit.textContent = jointUnit(j);
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "icon";
+  reset.title = `Reset to ${jointNumber(j.value)}${jointUnit(j)}`;
+  reset.setAttribute("aria-label", `Reset ${j.path}`);
+  reset.innerHTML = '<svg><use href="#i-reset"/></svg>';
+  head.append(name, number, unit, reset);
+  const range = document.createElement("input");
+  range.type = "range";
+  range.min = j.min;
+  range.max = j.max;
+  range.step = j.kind === "revolute" ? 1 : (j.max - j.min) / 200;
+  range.setAttribute("aria-label", j.path);
+  el.append(head, range);
+
+  const show = () => {
+    const v = jointValue(j);
+    range.value = v;
+    if (document.activeElement !== number) number.value = jointNumber(v);
+    reset.style.visibility = v === j.value ? "hidden" : "visible";
+  };
+  const set = (v) => {
+    if (!Number.isFinite(v)) return;
+    pose[j.path] = v;
+    applyPose();
+    show();
+  };
+  range.oninput = () => set(range.valueAsNumber);
+  number.oninput = () => set(number.valueAsNumber);
+  number.onblur = show;
+  reset.onclick = () => {
+    delete pose[j.path];
+    applyPose();
+    show();
+  };
+  show();
+  return el;
+}
+
+// --- Design panel: parts, joints, feature history, source, checks -----------
 function row(label, dim, current, onclick) {
   const b = document.createElement("button");
   b.className = "row";
@@ -481,7 +583,7 @@ function row(label, dim, current, onclick) {
 function renderDesign() {
   $("parts").hidden = !model;
   if (!model) {
-    $("steps").hidden = $("checks").hidden = true;
+    $("joints").hidden = $("steps").hidden = $("checks").hidden = true;
     return;
   }
   if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
@@ -492,6 +594,8 @@ function renderDesign() {
       renderDesign();
     }),
   ));
+  $("joints").hidden = model.joints.length === 0;
+  $("joints").replaceChildren(...model.joints.map(jointRow));
   const part = selectedPart !== null ? parts.get(selectedPart) : null;
   const steps = $("steps");
   steps.hidden = !part;
@@ -556,6 +660,7 @@ function setPreview(id) {
   const g = geometryOf(data);
   previewObject = new THREE.Group();
   previewObject.add(new THREE.Mesh(g, partMaterial), new THREE.LineSegments(new THREE.EdgesGeometry(g, 28), edgeMaterial));
+  bindPose(previewObject, parts.get(selectedPart).matrix);
   world.add(previewObject);
 }
 async function showSource(src) {
@@ -829,7 +934,7 @@ function payload() {
 async function send() {
   const text = input.value.trim();
   if (!text || !opened.entry) return;
-  const body = { text, refs: payload(), screenshot: screenshot() };
+  const body = { text, refs: payload(), pose: movedJoints(), screenshot: screenshot() };
   input.value = "";
   clearRefs();
   updateSend();
@@ -941,10 +1046,10 @@ function cancelListening() {
 $("mic").onclick = () => (listening ? stopListening() : startListening());
 
 // --- Keyboard ---------------------------------------------------------------
-const typing = () => document.activeElement === input || $("picker").open;
+const typing = () => document.activeElement === input || document.activeElement?.type === "number" || $("picker").open;
 addEventListener("keydown", (e) => {
   if (typing()) {
-    if (e.key === "Escape" && !$("picker").open) input.blur();
+    if (e.key === "Escape" && !$("picker").open) document.activeElement.blur();
     return;
   }
   if (e.code === "Space") {

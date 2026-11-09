@@ -35,14 +35,21 @@
 - a STEP file is also an entry: every command and the app open it directly as one part named after the file, with no ports and no TypeScript source
 - profiles: `polygon rect circle roundedRect`
 - features: `union cut intersect fillet chamfer shell translate rotate mirror`
-- structure: `part assembly port mate named`
+- structure: `part assembly port mate revolute slider named`
+- links: mates and joints join parts into one tree, growing from the first part; a closed loop is `OVER_CONSTRAINED`
+- joints: `revolute(a, b, { angle, min, max, gap })`, default range -180 to 180; `slider(a, b, { min, max, travel, angle })`; both are named in an assembly's `joints`
+- a joint's value lives in the source; `--pose` and the viewer only override it. Its path is `sub/name`, and a value outside its range is an error
+- a positive angle turns the moving part about its own port's +z; a positive travel separates the ports along the fixed port's +z
 - default export: an instance, or a function returning one; a part with required params exports a preview, `export default () => Part({ ... })`
 - rules: `check minClearance noOverlap`, run on every build
+- sweeps: `noCollision(a, b, { joint, steps })` samples a joint's range, only in `vibecad test`, and reports the first failing value; collisions between samples can be missed
+- a check reads other poses with `q.at(joint, value)`
 - face names: `<feature>.<face>`, for example `mount[2].side`; a split face gets `~2`
 
 ## cli
 
 - `build test query render export diff dev show`, see `vibecad --help`
+- `--pose joint=value,...` sets joint values for any command that builds, except `diff` and `dev`
 
 ## settings
 
@@ -60,11 +67,13 @@
 - selecting a file opens it in a tab; a project opens on `main.cad.ts` when it has one
 - a tab keeps its last good build until it closes, so switching tabs renders at once
 - kept builds have a limit, `keepMb`, measured on build output; over it, the longest unseen build is dropped, and that tab rebuilds when shown; the tab on screen is never dropped
-- pins, the draft message and the camera stay with their tab until it closes, even when its build is dropped; a pin goes when its face no longer exists
+- pins, the draft message, the pose and the camera stay with their tab until it closes, even when its build is dropped; a pin goes when its face no longer exists
 - a message carries only the pins of the tab it is sent from
 - only the tab on screen builds; saving any `.ts` marks the others stale, and they rebuild behind the kept model when shown
 - preview builds write to `.vibecad/preview`, so an agent's own build in `.vibecad/out` cannot land in a tab
 - other `.ts` files are plain code: not listed, but saving one rebuilds
+- the left panel has a slider per joint; moving one changes the view without a rebuild, using the joint data in `model.json`, and never writes the source
+- the viewer's pose stays with its tab through rebuilds; a message carries the joints moved away from the source
 - the agent session survives a file switch, and each message names the file being viewed
 - opening another project is refused while the agent runs
 - the browser remembers the last project and its tabs, and reopens them on start; a reopened tab builds when first shown
@@ -91,6 +100,8 @@
 
 ## status
 
+- wip: closed-loop linkages and more joint kinds (cylindrical, ball, planar)
+- wip: drawn strokes stay in place when a joint moves; pins follow their part
 - wip: sketch constraint solver, sweep, loft, draft, drawings, sheet metal
 - wip: per-feature build cache
 - wip: face labels in `vibecad render`
@@ -109,3 +120,4 @@
 - 2026-11-09: move app settings from CLI flags to a config file
 - 2026-11-09: import STEP files as solids
 - 2026-11-09: open STEP files directly as entries
+- 2026-11-09: add revolute and slider joints, poses, and range sweeps in `test`

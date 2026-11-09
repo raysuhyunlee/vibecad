@@ -29,9 +29,11 @@ const DEV_FILE = ".vibecad/dev.json";
 const USAGE = `vibecad <command> [entry=main.cad.ts]
 An entry is a *.cad.ts or STEP file.
 
+Commands that build also take --pose joint=value,other/joint=value.
+
   build [entry] [--steps] [--out-dir dir]
                                  Build; writes ${OUT_DIR}/model.json and meshes.json
-  test [entry]                   Build and fail if a design check fails
+  test [entry]                   Build and fail if a design check fails, including joint sweeps
   query [entry] [--part p] [--face id] [--clearance a,b]
                                  Inspect parts and faces or measure between parts
   render [entry] [--part p] [--out file.png]
@@ -88,6 +90,7 @@ function summary(m: Model) {
       path: p.path, type: p.type, src: p.src, volume: p.volume, size: p.bbox.size,
       faces: p.faces.length, steps: p.steps.length,
     })),
+    joints: m.joints.map((j) => ({ path: j.path, kind: j.kind, value: j.value, min: j.min, max: j.max, src: j.src })),
     checks: m.checks,
   };
 }
@@ -99,6 +102,19 @@ async function writeOutputs(out: BuildOutput, dir: string) {
     parts: out.meshes.map(encodeMesh),
     steps: Object.fromEntries([...out.stepMeshes].map(([id, m]) => [id, encodeMesh(m)])),
   }));
+}
+
+function parsePose(text: string | undefined) {
+  const pose: Record<string, number> = {};
+  for (const item of text ? text.split(",") : []) {
+    const at = item.indexOf("=");
+    const value = at > 0 ? Number(item.slice(at + 1)) : NaN;
+    if (!Number.isFinite(value) || item.slice(at + 1).trim() === "") {
+      throw new CadError("BAD_POSE", `Cannot read "${item}" in --pose`, undefined, "Use --pose joint=value,other/joint=value");
+    }
+    pose[item.slice(0, at)] = value;
+  }
+  return pose;
 }
 
 function pick(out: BuildOutput, part?: string) {
@@ -123,6 +139,7 @@ async function main() {
       out: { type: "string" },
       "out-dir": { type: "string" },
       message: { type: "string" },
+      pose: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -148,7 +165,11 @@ async function main() {
   }
   if (cmd === "show") return show(o.part, o.face, o.message);
 
-  const out = await build(await load(entry), { stepMeshes: !!o.steps });
+  const out = await build(await load(entry), {
+    stepMeshes: !!o.steps,
+    pose: parsePose(o.pose),
+    sweeps: cmd === "test",
+  });
   const k = await getKernel();
 
   switch (cmd) {

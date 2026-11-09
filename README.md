@@ -27,6 +27,13 @@ export const Plate = part("Plate", (p: { hole: number }) => ({
 }));
 ```
 
+Joints make an assembly move. Drag a joint's slider in the app, or set a pose from the CLI with `--pose pan=30`. `vibecad test` checks `noCollision` across the joint's range.
+
+```ts
+const pan = revolute(servo.port("shaft"), horn.port("hub"), { min: -90, max: 90 });
+return { parts: { servo, horn }, joints: { pan }, checks: [noCollision(horn, servo, { joint: pan })] };
+```
+
 ## Directory Structure
 
 ```text

@@ -1,4 +1,4 @@
-import { box, cylinder, part, port } from "vibecad";
+import { box, cylinder, extrude, part, port, roundedRect } from "vibecad";
 
 /** The dimension interface every standard-size servo shares. */
 export interface ServoMount {
@@ -7,6 +7,7 @@ export interface ServoMount {
   flangeHoleSpacingX: number; // between the hole columns, across the body
   flangeHoleSpacingY: number; // between the holes of one column
   holeDiameter: number;
+  shaftOffset: number; // output shaft from the body center, along the long axis
 }
 
 // Approximate standard-size servo. Confirm against the datasheet before fabricating.
@@ -16,6 +17,7 @@ export const StandardServo: ServoMount = {
   flangeHoleSpacingX: 49.5,
   flangeHoleSpacingY: 10,
   holeDiameter: 4.2,
+  shaftOffset: 10,
 };
 
 /** Hole centers of a servo flange, on the plane z=0. */
@@ -37,7 +39,22 @@ export const ServoBody = part("ServoBody", (p: { mount: ServoMount; height?: num
   return {
     solid: body.union(flange).cut(holes),
     // The underside of the flange seats on the bracket.
-    ports: { seat: port([0, 0, height - 8], [0, 0, -1]) },
+    ports: {
+      seat: port([0, 0, height - 8], [0, 0, -1]),
+      shaft: port([p.mount.shaftOffset, 0, height]),
+    },
+  };
+});
+
+/** A two-arm horn. The shaft sits at its center. */
+export const ServoHorn = part("ServoHorn", (p: { span?: number; width?: number; thickness?: number; tipRadius?: number }) => {
+  const span = p.span ?? 40; // tip to tip
+  const width = p.width ?? 8;
+  const thickness = p.thickness ?? 3;
+  const tipRadius = p.tipRadius ?? 3; // outline corners of the arm tips
+  return {
+    solid: extrude(roundedRect(span, width, tipRadius), thickness).named("arm"),
+    ports: { hub: port([0, 0, 0], [0, 0, -1]) },
   };
 });
 

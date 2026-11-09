@@ -251,6 +251,37 @@ export function mate(a: PortRef, b: PortRef, opts: { gap?: number; angle?: numbe
   return { a, b, gap: opts.gap ?? 0, angle: opts.angle ?? 0, src: callerSrc() };
 }
 
+/** A mate that can move. Its value is an angle in degrees, or a travel in model units. */
+export interface JointDef extends MateDef {
+  kind: "revolute" | "slider";
+  min: number;
+  max: number;
+}
+const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+/** Turns the moving part about its own port's +z. The value is `angle`, -180 to 180 by default. */
+export function revolute(
+  a: PortRef,
+  b: PortRef,
+  opts: { angle?: number; min?: number; max?: number; gap?: number } = {},
+): JointDef {
+  const min = opts.min ?? -180, max = opts.max ?? 180;
+  return {
+    kind: "revolute", a, b, min, max, gap: opts.gap ?? 0,
+    angle: opts.angle ?? clamp(0, min, max), src: callerSrc(),
+  };
+}
+/** Slides the ports apart along the fixed port's +z. The value is `travel`. */
+export function slider(
+  a: PortRef,
+  b: PortRef,
+  opts: { min: number; max: number; travel?: number; angle?: number },
+): JointDef {
+  return {
+    kind: "slider", a, b, min: opts.min, max: opts.max,
+    gap: opts.travel ?? clamp(0, opts.min, opts.max), angle: opts.angle ?? 0, src: callerSrc(),
+  };
+}
+
 export interface Query {
   /** Minimum distance between two solids, 0 when touching or overlapping. */
   distance(a: Instance, b: Instance): number;
@@ -258,11 +289,15 @@ export interface Query {
   /** Volume shared by two solids. */
   overlap(a: Instance, b: Instance): number;
   bbox(a: Instance): { min: Vec3; max: Vec3; size: Vec3 };
+  /** The same queries with one joint moved. Other joints keep their values. */
+  at(joint: JointDef, value: number): Query;
 }
 export interface CheckDef {
   name: string;
   fn: (q: Query) => boolean;
   src: Src;
+  /** Runs fn across a joint's range, only in `vibecad test`. */
+  sweep?: { joint: JointDef; steps: number };
 }
 /** A design rule, evaluated on every build. */
 export function check(name: string, fn: (q: Query) => boolean): CheckDef {
@@ -283,6 +318,16 @@ export function noOverlap(a: Instance, b: Instance): CheckDef {
   };
 }
 
+/** Fails if the parts overlap at any sampled value of the joint. Collisions between samples can be missed. */
+export function noCollision(a: Instance, b: Instance, opts: { joint: JointDef; steps?: number }): CheckDef {
+  return {
+    name: `no collision(${a.typeName}, ${b.typeName}) across joint range`,
+    fn: (q) => q.overlap(a, b) < 1e-6,
+    src: callerSrc(),
+    sweep: { joint: opts.joint, steps: opts.steps ?? 13 },
+  };
+}
+
 const INSTANCE = Symbol.for("vibecad.instance");
 /** Works across copies of this module, such as a revision checked out by `diff`. */
 export function isInstance(v: unknown): v is Instance {
@@ -298,6 +343,7 @@ export class Instance<P extends string = string> {
   readonly ports: Record<string, PortDef | PortRef>;
   readonly children: Record<string, Instance>;
   readonly mates: MateDef[];
+  readonly joints: Record<string, JointDef>;
   readonly checks: CheckDef[];
 
   constructor(init: {
@@ -308,6 +354,7 @@ export class Instance<P extends string = string> {
     ports?: Record<string, PortDef | PortRef>;
     children?: Record<string, Instance>;
     mates?: MateDef[];
+    joints?: Record<string, JointDef>;
     checks?: CheckDef[];
   }) {
     this.typeName = init.typeName;
@@ -317,6 +364,7 @@ export class Instance<P extends string = string> {
     this.ports = init.ports ?? {};
     this.children = init.children ?? {};
     this.mates = init.mates ?? [];
+    this.joints = init.joints ?? {};
     this.checks = init.checks ?? [];
   }
 
@@ -357,12 +405,13 @@ export function part<P extends object, K extends string = never>(
   };
 }
 
-/** Defines an assembly type: named child instances joined by mates. */
+/** Defines an assembly type: named child instances joined by mates and joints. */
 export function assembly<P extends object, K extends string = never>(
   typeName: string,
   build: (params: P) => {
     parts: Record<string, Instance<any>>;
     mates?: MateDef[];
+    joints?: Record<string, JointDef>;
     ports?: Record<K, PortRef>;
     checks?: CheckDef[];
   },
@@ -375,6 +424,7 @@ export function assembly<P extends object, K extends string = never>(
       typeName, params, src,
       children: r.parts,
       ...(r.mates && { mates: r.mates }),
+      ...(r.joints && { joints: r.joints }),
       ...(r.ports && { ports: r.ports }),
       ...(r.checks && { checks: r.checks }),
     });

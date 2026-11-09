@@ -47,6 +47,7 @@ interface Feedback {
   text: string;
   entry: string;
   refs: string[];
+  pose?: string;
   screenshot?: string;
 }
 
@@ -279,10 +280,11 @@ export async function serve(o: {
         `Read AGENTS.md if it exists. Change the TypeScript source, never generated files. ` +
         `The preview rebuilds on every save. Verify with \`${cli} build <entry>\` and \`${cli} test <entry>\`. ` +
         `Use \`${cli} render <entry>\` to see the result, and \`${cli} show --part P --face F --message M\` ` +
-        `to point at geometry when you ask the person something. Reply in the person's language, briefly.\n\n`
+        `to point at geometry when you ask the person something. Commands that build take \`--pose joint=value,...\`. Reply in the person's language, briefly.\n\n`
       : "";
     const body = batch.map((f) => {
       const lines = [`Viewing: ${f.entry}`, `Person said: ${JSON.stringify(f.text)}`];
+      if (f.pose) lines.push(`They moved joints in the viewer, without changing the source. Points and the screenshot use this pose: --pose ${f.pose}`);
       if (f.refs.length) lines.push("They pointed at (tokens like [1] in the text refer to these):", ...f.refs);
       if (f.screenshot) lines.push(`Screenshot of what they see: ${f.screenshot}`);
       return lines.join("\n");
@@ -421,6 +423,8 @@ export async function serve(o: {
         const id = ++feedbackId;
         // Described now: the model may be a different file by the time the turn starts.
         const feedback: Feedback = { text, entry, refs: refs.map(describeRef) };
+        const pose = Object.entries(b.pose ?? {}).filter(([, v]) => Number.isFinite(v)).map(([j, v]) => `${j}=${v}`);
+        if (pose.length) feedback.pose = pose.join(",");
         if (typeof b.screenshot === "string" && b.screenshot.startsWith("data:image/png;base64,")) {
           mkdirSync(".vibecad/feedback", { recursive: true });
           feedback.screenshot = `.vibecad/feedback/${Date.now()}-${id}.png`;
