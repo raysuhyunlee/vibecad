@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  assembly, box, check, circle, closedSpline, cylinder, edges, extrude, importStep, mate, minClearance, noCollision, offset, outerTangent, part, path,
-  plane, polygon, port, rect, revolute, revolve, roundedRect, slider,
+  assembly, box, check, circle, closedSpline, cylinder, edges, extrude, helix, importStep, loft, mate, minClearance, noCollision, offset, onFace, outerTangent, part, path,
+  plane, polygon, port, rect, revolute, revolve, roundedRect, slider, spine, sweep,
 } from "../src/index.ts";
 import { build, CadError, getKernel } from "../src/eval.ts";
 import type { Vec3 } from "../src/lang.ts";
@@ -192,7 +192,153 @@ test("a fillet the kernel refuses is filled, and stops where the wall's outline 
   assert.ok(added > 0.95 * full && added < full, `${added} of ${full}`);
 });
 
-test("a fillet still fails when it is not a concave corner between flat faces", async () => {
+test("a refused fillet on a straight convex edge removes the corner, and stops where the outline curves in", async () => {
+  // The end wall is 2 tall, so the fillet of 3 on its top edge runs out over the arc above it.
+  const outline = path([-20, 0]).line([20, 0]).line([20, 2])
+    .arc([10, 2], [15, 2 + 10 * Math.sin(Math.PI / 3)])
+    .line([-15, 2 + 10 * Math.sin(Math.PI / 3)])
+    .arc([-10, 2], [-20, 2]).close();
+  const body = extrude(outline, 30).named("b");
+  const r = 3;
+  const plain = await facesOf(body);
+  const out = await build(part("P", () => body.fillet(r, edges.between("b.side[1]", "b.top")).named("f"))());
+  const m = out.model.parts[0]!;
+  assert.ok((await getKernel()).isValid([...out.shapes.values()][0]!));
+  assert.ok(m.faces.some((f) => f.name === "f" && f.surface === "cylinder"));
+  closeTo(plain.volume - m.volume, (1 - Math.PI / 4) * r ** 2 * 2, 1e-3);
+  assert.ok(m.faces.some((f) => f.id === "b.top"));
+});
+
+test("a refused fillet on a curved convex edge follows the wall, and stops at the cut through it", async () => {
+  const body = cylinder(10, 10).named("c").cut(box(4, 12, 4).named("k").translate(9, 0, 8));
+  const r = 3;
+  const plain = await facesOf(body);
+  const out = await build(part("P", () => body.fillet(r, edges.between("c.top", "c.side")).named("f"))());
+  const m = out.model.parts[0]!;
+  assert.ok((await getKernel()).isValid([...out.shapes.values()][0]!));
+  assert.ok(m.faces.some((f) => f.name === "f" && f.surface === "torus"));
+  // Pappus: the section's area around its centroid's circle, over the part of the turn the cut leaves.
+  const area = (1 - Math.PI / 4) * r ** 2;
+  const centroid = 10 - (r * (10 - 3 * Math.PI)) / (12 - 3 * Math.PI);
+  const turn = 2 * Math.PI - 2 * Math.asin(0.6);
+  const removed = plain.volume - m.volume;
+  assert.ok(removed > 0.95 * area * centroid * turn && removed < 1.05 * area * centroid * turn, `${removed}`);
+});
+
+test("a broken fillet from the kernel is rebuilt where a curved wall runs off a narrow floor", async () => {
+  const body = cylinder(5, 10).named("boss").union(box(40, 6, 2).named("floor").translate(0, 0, -2));
+  const out = await build(part("P", () => body.fillet(1, edges.between("boss.side", "floor.top")).named("f"))());
+  const m = out.model.parts[0]!;
+  assert.ok((await getKernel()).isValid([...out.shapes.values()][0]!));
+  assert.ok(m.faces.some((f) => f.name === "f" && f.surface === "torus"));
+  assert.ok(m.volume > (await facesOf(body)).volume);
+});
+
+const centerIs = (f: { center: Vec3 }, want: Vec3) => f.center.forEach((v, i) => closeTo(v, want[i]!));
+
+test("a sketch on a face sits on it, and follows the solid's size", async () => {
+  const on = (height: number) => {
+    const base = box(40, 20, height).named("base");
+    return base.union(extrude(circle(3), 10, onFace(base, "base.top", { at: [5, 0] })).named("post"));
+  };
+  for (const height of [5, 8]) {
+    const post = (await facesOf(on(height))).faces.find((f) => f.id === "post.top")!;
+    centerIs(post, [5, 0, height + 10]);
+  }
+});
+
+test("a sketch points out of its face on any side, and a negative height cuts in", async () => {
+  const base = box(40, 20, 5).named("base");
+  const out = await facesOf(extrude(circle(1), 3, onFace(base, "base.right")).named("p"));
+  centerIs(out.faces.find((f) => f.id === "p.top")!, [23, 0, 2.5]);
+  const under = await facesOf(extrude(circle(1), 3, onFace(base.mirror("z"), "base.top")).named("p"));
+  centerIs(under.faces.find((f) => f.id === "p.top")!, [0, 0, -8]);
+  const pocket = await facesOf(base.cut(extrude(rect(10, 10), -2, onFace(base, "base.top")).named("pocket")));
+  closeTo(pocket.volume, 40 * 20 * 5 - 200);
+});
+
+test("a hole in a face does not move a sketch on it", async () => {
+  const holed = box(40, 20, 5).named("base").cut(cylinder(2, 10).named("bore").translate(10, 0, -1));
+  const p = await facesOf(extrude(circle(1), 3, onFace(holed, "base.top")).named("p"));
+  centerIs(p.faces.find((f) => f.id === "p.top")!, [0, 0, 8]);
+});
+
+test("a sketch needs one flat face", async () => {
+  const fails = (s: ReturnType<typeof box>, code: string, hint: RegExp) =>
+    assert.rejects(build(part("P", () => s)()), (e: CadError) => {
+      assert.equal(e.code, code);
+      assert.match(e.hint!, hint);
+      return true;
+    });
+  const split = box(40, 20, 5).named("base").cut(box(5, 30, 10).named("slot"));
+  await fails(extrude(circle(1), 3, onFace(split, "base.top")), "AMBIGUOUS_FACE", /base\.top~2/);
+  await fails(extrude(circle(1), 3, onFace(split, "nope")), "EMPTY_SELECTION", /base\.top/);
+  await fails(extrude(circle(1), 3, onFace(cylinder(5, 5).named("c"), "c.side")), "FACE_NOT_FLAT", /flat/);
+  const piece = await facesOf(extrude(circle(1), 3, onFace(split, "base.top~2")).named("p"));
+  assert.equal(Math.abs(piece.faces.find((f) => f.id === "p.top")!.center[0]), 11.25);
+});
+
+test("a sweep starts on its spine, miters corners, and names its walls", async () => {
+  const m = await facesOf(sweep(rect(4, 2), spine([0, 0, 0]).line([0, 0, 20]).line([0, 20, 20])).named("s"));
+  closeTo(m.volume, 8 * 40);
+  centerIs(m.faces.find((f) => f.id === "s.start")!, [0, 0, 0]);
+  centerIs(m.faces.find((f) => f.id === "s.end")!, [0, 20, 20]);
+  assert.ok(m.faces.some((f) => f.id === "s.side[0]") && m.faces.some((f) => f.id === "s.side[0]~2"));
+
+  const named = path([-1, -1]).line([1, -1]).named("floor").line([1, 1]).line([-1, 1]).close();
+  const along = await facesOf(sweep(named, spine([5, 5, 5]).line([25, 5, 5]), { x: "y" }).named("s"));
+  centerIs(along.faces.find((f) => f.id === "s.start")!, [5, 5, 5]);
+  assert.ok(along.faces.some((f) => f.id === "s.floor"));
+});
+
+test("a sweep follows arcs and splines, tangent to what came before", async () => {
+  const arc = await facesOf(sweep(circle(1), spine([0, 0, 0]).line([0, 0, 20]).tangentArc([0, 10, 30])).named("s"));
+  centerIs(arc.faces.find((f) => f.id === "s.end")!, [0, 10, 30]);
+  const curve = await facesOf(sweep(rect(2, 2), spine([0, 0, 0]).spline([[10, 5, 5], [20, 0, 10]])).named("s"));
+  centerIs(curve.faces.find((f) => f.id === "s.end")!, [20, 0, 10]);
+});
+
+test("a sweep along a helix keeps its section, either way around", async () => {
+  const length = 4 * Math.hypot(2 * Math.PI * 10, 5);
+  const square = await facesOf(sweep(rect(2, 2), helix(10, 5, 20)).named("h"));
+  closeTo(square.volume / (4 * length), 1, 1e-3);
+  const right = await facesOf(sweep(circle(1), helix(10, 5, 20)).named("h"));
+  const left = await facesOf(sweep(circle(1), helix(10, 5, 20, { left: true })).named("h"));
+  closeTo(left.volume, right.volume, 1e-3);
+});
+
+test("a sweep that cannot make a solid says so", async () => {
+  const tight = sweep(rect(30, 30), spine([0, 0, 0]).line([0, 0, 10]).arc([0, 2, 12], [0, 4, 10]));
+  await assert.rejects(build(part("P", () => tight)()), (e: CadError) => e.code === "BAD_SHAPE");
+});
+
+test("a loft blends sections on planes and faces, and names walls from the first", async () => {
+  const frustum = await facesOf(loft([
+    { profile: rect(20, 20), on: plane([0, 0, 0]) },
+    { profile: rect(10, 10), on: plane([0, 0, 30]) },
+  ]).named("l"));
+  closeTo(frustum.volume, 7000);
+  assert.deepEqual(frustum.faces.map((f) => f.id).sort(), ["l.end", "l.side[0]", "l.side[1]", "l.side[2]", "l.side[3]", "l.start"]);
+
+  const base = box(40, 20, 5).named("base");
+  const mixed = await facesOf(loft([
+    { profile: rect(10, 10), on: onFace(base, "base.top") },
+    { profile: circle(2), on: plane([0, 0, 20]) },
+  ]).named("l"));
+  centerIs(mixed.faces.find((f) => f.id === "l.start")!, [0, 0, 5]);
+  centerIs(mixed.faces.find((f) => f.id === "l.end")!, [0, 0, 20]);
+
+  const three = (ruled: boolean) => loft([
+    { profile: rect(20, 20), on: plane([0, 0, 0]) },
+    { profile: rect(30, 30), on: plane([0, 0, 15]) },
+    { profile: rect(10, 10), on: plane([0, 0, 30]) },
+  ], { ruled }).named("l");
+  closeTo((await facesOf(three(true))).volume, 16000, 1e-3);
+  assert.ok((await facesOf(three(false))).volume > 16000);
+  assert.throws(() => loft([{ profile: rect(1, 1), on: plane([0, 0, 0]) }]), /at least 2/);
+});
+
+test("a fillet still fails when its radius fits nowhere along the edge", async () => {
   const roundOuter = extrude(path([0, 0]).line([10, 0]).line([10, 10]).line([0, 10]).close(), 5).named("b")
     .fillet(20, edges.between("b.side[0]", "b.top"));
   await assert.rejects(build(part("P", () => roundOuter)()), (e: CadError) => e.code === "OP_FAILED");

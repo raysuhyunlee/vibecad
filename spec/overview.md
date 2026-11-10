@@ -28,7 +28,7 @@
 
 ## language
 
-- primitives: `box cylinder cone sphere extrude revolve`
+- primitives: `box cylinder cone sphere extrude revolve sweep loft`
 - import: `importStep(file)` loads a STEP file as a solid, with its path relative to the calling source file
 - an imported file has no feature names, so its faces are `<feature>.face[i]` in file order; replacing the file can renumber them, so prefer selecting the whole feature, `edges.of("motor").curve("circle")`
 - STEP files are tracked in git, because `diff` builds revisions from git; saving one in the project rebuilds
@@ -43,7 +43,18 @@
 - an offset that leaves anything but one outline is `BAD_OFFSET`
 - sketch planes: `plane(at, z, x)`; `extrude(profile, height, on)` and `revolve(profile, axis, degrees, on)` sketch on it and sweep along its +z, or turn about the sketch's own axis
 - a plane's sketch y is z cross x; without x, the sketch's x is world X projected onto the plane, or world Y when z is near X
-- face names are the same on any plane; a plane is given by numbers, not picked from another solid's face
+- face names are the same on any plane
+- sketching on a face: `onFace(solid, face, { x, at })` works wherever a plane does, and stays on the face when the solid's dimensions change
+- `face` is a face id of that solid at that feature; +z points out of the solid, and the origin is the center of the face's outline, moved by `at` in sketch units, so a hole does not move it
+- x follows the plane rule; a sketch going into the solid has a negative height
+- a curved face is `FACE_NOT_FLAT`; a face split in pieces is `AMBIGUOUS_FACE`, and its hint lists the ids such as `base.top~2`
+- `spine(start)` builds an open 3D curve: `line(to) arc(through, to) tangentArc(to) spline(through)`; `helix(radius, pitch, height, { left })` runs about +z from `[radius, 0, 0]`
+- `sweep(profile, spine, { x })` puts the sketch's origin on the spine's start, with +z along the spine, and x follows the plane rule; to place a helix, move the solid
+- a sweep keeps its profile from twisting and miters sharp corners; on a helix the profile turns with the curve
+- each further spine segment repeats the wall names with `~2` and so on
+- `loft([{ profile, on }, ...], { ruled })` blends two or more sections, each on a plane or a face; `ruled` makes straight walls between them
+- loft walls are named from the first section's segments, and a section with fewer or more segments can split them with `~2`
+- a sweep or loft that is not one valid solid is `BAD_SHAPE`
 - `round(r)` rounds the corner at the current point, against lines or arcs; to round the start, end on it with an explicit `line(start)`
 - bad geometry stops at the call: an arc end off its circle, a round that does not fit or has no corner
 - `outerTangent(c1, r1, c2, r2, side)` gives the touch points of a line tangent to two circles
@@ -59,9 +70,12 @@
 - a check reads other poses with `q.at(joint, value)`
 - face names: `<feature>.<face>`, for example `mount[2].side`; a split face gets `~2`
 - a swept profile's wall takes its segment's name, or else `side[i]`, its place in the outline counting rounds; an outline of one segment gives `side`
-- caps are `top` and `bottom` on an extrude, `start` and `end` on a partial revolve; these and `side` are reserved as segment names
+- caps are `top` and `bottom` on an extrude, `start` and `end` on a partial revolve, a sweep and a loft; these and `side` are reserved as segment names
 - `fillet` and `chamfer` follow the kernel: they carry on along edges tangent to the selection
-- when the kernel refuses a fillet on straight concave edges between flat faces, vibecad fills each corner directly: the fill spans the edge and is clipped to both faces' outlines. Any other refused fillet stays an error
+- when the kernel refuses a fillet or returns a broken solid, vibecad builds it directly: the fillet's section is swept along each edge, clipped to both faces' outlines, then added to a concave corner or removed from a convex one
+- this works for line and planar curved edges where each face is flat, or straight across the edge, such as an extruded wall meeting a plane square to it
+- each edge is built alone: only selected edges are filleted, with no carrying on along tangent edges, and a fillet stops flat at the end of its edge
+- a refused fillet stays an error when its section would change along the edge, a face curves across the edge, or the radius fits nowhere along the edge
 
 ## cli
 
@@ -122,11 +136,10 @@
 ## status
 
 - modeling priority, draft: constraint solver is next
-- wip: sketching on a selected face
-- wip: fillet runout on curved walls or convex edges
+- wip: fillet runout where a face curves across the edge or the section changes along it, such as on a cone or sphere
 - wip: closed-loop linkages and more joint kinds (cylindrical, ball, planar)
 - wip: drawn strokes stay in place when a joint moves; pins follow their part
-- wip: sketch constraint solver, sweep, loft, draft, drawings, sheet metal
+- wip: sketch constraint solver, draft, drawings, sheet metal
 - wip: per-feature build cache
 - wip: isolating the agent from the person's global settings
 - wip: npm distribution. Node will not strip types under `node_modules`, so vibecad runs from this repo today; a release needs compiled output
@@ -148,3 +161,4 @@
 - 2026-11-09: fill refused fillets on straight concave edges between flat faces
 - 2026-11-09: builds stop with the app and fail when their working directory is gone
 - 2026-11-09: add sketch planes, sketch offset and splines; add face labels to `render`
+- 2026-11-09: add `onFace`, `sweep` and `loft`; build refused fillets on convex edges and curved walls

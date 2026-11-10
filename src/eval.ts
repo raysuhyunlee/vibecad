@@ -1,10 +1,10 @@
 // Evaluates the feature graph on OCCT and tracks every face back to its source.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { BooleanOp, JoinType, OcctKernel, type EvolutionData, type ShapeHandle } from "occt-wasm";
+import { BooleanOp, JoinType, OcctKernel, SweepMode, TransitionMode, type EvolutionData, type ShapeHandle } from "occt-wasm";
 import {
   EdgeSel, Instance, Solid,
-  type CheckDef, type JointDef, type MateDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Src, type Vec3,
+  type CheckDef, type FaceRef, type Helix, type JointDef, type MateDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Spine, type Src, type Vec3,
 } from "./lang.ts";
 
 const HASH_BOUND = 2147483647;
@@ -217,12 +217,16 @@ class Evaluator {
     const k = this.k;
     const sources = this.segmentEdges(p);
     const face = this.face(n, p, sources);
-    const ev = sweep(face);
+    return this.tagWalls(n, p, caps, sweep(face), k.getSubShapes(face, "edge"), sources);
+  }
+
+  /** Names caps and walls from history. A wall the kernel does not trace to a segment is "side". */
+  tagWalls(n: Solid, p: Profile, caps: [string, string], ev: EvolutionData, edges: ShapeHandle[], sources: ShapeHandle[]): Evaluated {
     const tags = new Map<number, Tag>();
     const tag = (h: number, name: string) => tags.set(h, { name: `${n.name}.${name}`, src: n.src });
     for (const h of ev.firstShape) tag(h, caps[0]);
     for (const h of ev.lastShape) tag(h, caps[1]);
-    const segOf = new Map(k.getSubShapes(face, "edge").map((e) => [this.hash(e), this.segmentOf(e, sources)]));
+    const segOf = new Map(edges.map((e) => [this.hash(e), this.segmentOf(e, sources)]));
     for (let i = 0; i < ev.edgeGenerated.length; ) {
       const seg = segOf.get(ev.edgeGenerated[i]!);
       const count = ev.edgeGenerated[i + 1]!;
@@ -232,7 +236,114 @@ class Evaluator {
       }
       i += 2 + count;
     }
+    for (const f of this.faces(ev.result)) if (!tags.has(this.hash(f))) tag(this.hash(f), "side");
     return { shape: ev.result, tags };
+  }
+
+  /** A sweep or loft can return a shape that looks right but is not a solid. */
+  sound(n: Solid, shape: ShapeHandle, hint: string) {
+    if (!this.k.isValid(shape) || this.k.getSubShapes(shape, "solid").length !== 1) {
+      throw new CadError("BAD_SHAPE", `${n.op} "${n.name}" did not make one valid solid`, n.src, hint);
+    }
+  }
+
+  /** Resolves a sketch on a named face to numbers, from the solid as it stands at that feature. */
+  sketchPlane(n: Solid, on: Plane | FaceRef | undefined): Plane | undefined {
+    if (!on || !("face" in on)) return on;
+    const k = this.k;
+    const e = this.eval(on.solid);
+    const seen = new Map<string, number>();
+    const listed = this.faces(e.shape).flatMap((f) => {
+      const name = e.tags.get(this.hash(f))?.name;
+      if (name === undefined) return [];
+      const count = (seen.get(name) ?? 0) + 1;
+      seen.set(name, count);
+      return [{ f, name, id: count === 1 ? name : `${name}~${count}` }];
+    });
+    const found = listed.filter((x) => x.id === on.face || x.name === on.face);
+    if (found.length === 0) throw this.noMatch(n, `face ${on.face}`, e);
+    if (found.length > 1) {
+      throw new CadError(
+        "AMBIGUOUS_FACE", `${on.face} was split into ${found.length} faces`, n.src,
+        `Pick one: ${found.map((x) => x.id).join(", ")}`,
+      );
+    }
+    const f = found[0]!.f;
+    if (k.surfaceType(f) !== "plane") {
+      throw new CadError("FACE_NOT_FLAT", `${on.face} is a ${k.surfaceType(f)} face, so it cannot hold a sketch`, n.src, "Pick a flat face, or use plane() with numbers.");
+    }
+    const z = this.normalAt(f, tuple(k.getSurfaceCenterOfMass(f)));
+    if (on.x && Math.hypot(...cross(z, on.x)) < 1e-9) {
+      throw new CadError("BAD_PLANE", `x [${on.x}] is parallel to the normal of ${on.face}`, n.src, "Choose an x that lies along the face.");
+    }
+    // The outline's center, so a hole cut in the face does not move the sketch.
+    const center = tuple(k.getSurfaceCenterOfMass(k.makeFace(k.outerWire(f))));
+    const m = frame(center, z, on.x);
+    const [u, v] = on.at ?? [0, 0];
+    const at: Vec3 = [m[0]! * u + m[1]! * v + m[3]!, m[4]! * u + m[5]! * v + m[7]!, m[8]! * u + m[9]! * v + m[11]!];
+    return { at, z, ...(on.x && { x: on.x }) };
+  }
+
+  /** The face's outward normal at the surface point nearest p. */
+  normalAt(f: ShapeHandle, p: Vec3): Vec3 {
+    const { u, v } = this.k.uvFromPoint(f, vec(p));
+    return norm(tuple(this.k.surfaceNormal(f, u, v)));
+  }
+
+  spineWire(s: Spine | Helix) {
+    const k = this.k;
+    if ("radius" in s) {
+      return k.makeHelixWireHanded(vec([0, 0, 0]), vec([0, 0, 1]), s.pitch, s.height, s.radius, s.left);
+    }
+    let at = s.start;
+    const made: ShapeHandle[] = [];
+    for (const seg of s.segments) {
+      const end = seg.t === "spline" ? seg.through.at(-1)! : seg.to;
+      if (seg.t === "line") made.push(k.makeLineEdge(vec(at), vec(end)));
+      else if (seg.t === "arc") made.push(k.makeArcEdge(vec(at), vec(seg.through), vec(end)));
+      else if (seg.t === "spline") made.push(k.interpolatePoints([at, ...seg.through].map(vec), false));
+      else {
+        const prev = made.at(-1)!;
+        made.push(k.makeTangentArc(vec(at), k.curveTangent(prev, k.curveParameters(prev).last), vec(end)));
+      }
+      at = end;
+    }
+    return k.makeWire(made);
+  }
+
+  /** The profile starts square to the spine's start, then rides along it. */
+  sweep(n: Solid, p: Profile, s: Spine | Helix, x: Vec3 | undefined) {
+    const k = this.k;
+    const spine = this.spineWire(s);
+    const first = k.getSubShapes(spine, "edge")[0]!;
+    const start = k.curveParameters(first).first;
+    const z = norm(tuple(k.curveTangent(first, start)));
+    if (x && Math.hypot(...cross(z, x)) < 1e-9) {
+      throw new CadError("BAD_PLANE", `x [${x}] is parallel to the start of the spine`, n.src, "Choose an x across the spine.");
+    }
+    const on: Plane = { at: tuple(k.curvePointAtParam(first, start)), z, ...(x && { x }) };
+    // Sweeps happen in the sketch's own frame, so the profile stays on XY and names work as in an extrude.
+    const local = k.transform(spine, invert(frame(on.at, on.z, on.x)));
+    // A helix has to turn its profile with it. Elsewhere the profile must not twist, and corners are mitered.
+    const options = "radius" in s ? { mode: SweepMode.Frenet } : { mode: SweepMode.Fixed, transitionMode: TransitionMode.RightCorner };
+    const made = this.swept(n, p, ["start", "end"], (f) => k.sweepWithHistory(k.outerWire(f), local, [], HASH_BOUND, options));
+    this.sound(n, made.shape, "The profile may be too big for the spine's bends, or the sweep may run into itself.");
+    return this.onPlane(n, made, on);
+  }
+
+  loft(n: Solid, sections: Array<{ profile: Profile; on: Plane | FaceRef }>, ruled: boolean) {
+    const k = this.k;
+    const placed = sections.map(({ profile, on }) => {
+      const sources = this.segmentEdges(profile);
+      const face = this.face(n, profile, sources);
+      const plane = this.sketchPlane(n, on)!;
+      const m = frame(plane.at, plane.z, plane.x);
+      return { wire: k.transform(k.outerWire(face), m), sources: sources.map((e) => k.transform(e, m)) };
+    });
+    const ev = k.loftWithHistory(placed.map((s) => s.wire), true, ruled, [], HASH_BOUND);
+    this.sound(n, ev.result, "Check that the sections do not cross, and that they run in the same direction around.");
+    const head = placed[0]!;
+    return this.tagWalls(n, sections[0]!.profile, ["start", "end"], ev, k.getSubShapes(head.wire, "edge"), head.sources);
   }
 
   /**
@@ -295,10 +406,14 @@ class Evaluator {
         return this.primitive(n, k.makeSphere(a.radius));
       case "extrude":
         return this.onPlane(n, this.swept(n, a.profile, [a.height > 0 ? "bottom" : "top", a.height > 0 ? "top" : "bottom"], (f) =>
-          k.extrudeWithHistory(f, 0, 0, a.height, [], HASH_BOUND)), a.on);
+          k.extrudeWithHistory(f, 0, 0, a.height, [], HASH_BOUND)), this.sketchPlane(n, a.on));
       case "revolve":
         return this.onPlane(n, this.swept(n, a.profile, ["start", "end"], (f) =>
-          k.revolveWithHistory(f, { point: vec([0, 0, 0]), direction: vec(a.axis) }, a.degrees * DEG, [], HASH_BOUND)), a.on);
+          k.revolveWithHistory(f, { point: vec([0, 0, 0]), direction: vec(a.axis) }, a.degrees * DEG, [], HASH_BOUND)), this.sketchPlane(n, a.on));
+      case "sweep":
+        return this.sweep(n, a.profile, a.spine, a.x);
+      case "loft":
+        return this.loft(n, a.sections, a.ruled);
       case "importStep": {
         if (!existsSync(a.path)) {
           throw new CadError("STEP_NOT_FOUND", `No STEP file at ${a.path}`, n.src, "The path is relative to the source file that calls importStep.");
@@ -335,11 +450,13 @@ class Evaluator {
         let ev: EvolutionData;
         try {
           ev = k.filletWithHistory(solid, es, a.radius, this.hashes(inputs), HASH_BOUND);
+          // On some runouts the kernel returns a broken solid instead of refusing.
+          if (!k.isValid(ev.result)) throw new Error("the kernel's fillet is not a valid solid");
         } catch (e) {
           // OCCT cannot run a fillet out over a curved end. See runoutFillet.
-          const made = this.runoutFillet(solid, es, a.radius, inputs);
+          const made = this.runoutFillet(n, solid, es, a.radius, inputs);
           if (!made) throw e;
-          ev = made;
+          return made;
         }
         return this.track(n, ev.result, ev, inputs);
       }
@@ -367,62 +484,88 @@ class Evaluator {
   }
 
   /**
-   * Fills straight concave corners between flat faces directly, for the fillets the kernel refuses.
-   * Each filler spans its edge and is clipped to the outlines of both faces, so it ends where they do.
-   * Returns undefined when any edge is another kind, so the caller reports the kernel's error.
+   * Builds the fillets the kernel refuses directly: material added to concave corners, and removed from convex ones.
+   * Each tool spans its edge and is clipped to the outlines of both faces, so it ends where they do.
+   * Returns undefined when an edge cannot be done exactly, so the caller reports the kernel's error.
    */
-  runoutFillet(solid: ShapeHandle, es: ShapeHandle[], r: number, inputs: Evaluated[]): EvolutionData | undefined {
+  runoutFillet(n: Solid, solid: ShapeHandle, es: ShapeHandle[], r: number, inputs: Evaluated[]): Evaluated | undefined {
     const k = this.k;
-    const eps = 1e-3;
-    const point = (p: Vec3) => k.makeVertex(p[0], p[1], p[2]);
-    const fillers: ShapeHandle[] = [];
+    const tools = { fill: [] as ShapeHandle[], remove: [] as ShapeHandle[] };
     for (const edge of es) {
-      if (k.curveType(edge) !== "line") return undefined;
-      const h = this.hash(edge);
-      const sides = this.faces(solid).filter((f) => k.getSubShapes(f, "edge").some((x) => this.hash(x) === h));
-      if (sides.length !== 2 || sides.some((f) => k.surfaceType(f) !== "plane")) return undefined;
-      const [v0, v1] = k.getSubShapes(edge, "vertex");
-      if (v0 === undefined || v1 === undefined) return undefined;
-      const p0 = tuple(k.vertexPosition(v0)), p1 = tuple(k.vertexPosition(v1));
-      const length = Math.hypot(...sub(p1, p0));
-      const dir = norm(sub(p1, p0));
-      const mid = add(p0, scale(dir, length / 2));
-      const inward = sides.map((f) => {
-        const data = k.surfaceData(f);
-        if (data.kind !== "plane") throw new Error("not a plane");
-        const w = cross(dir, tuple(data.normal));
-        return k.distanceBetween(f, point(add(mid, scale(w, eps)))) < eps / 1000 ? w : scale(w, -1);
-      }) as [Vec3, Vec3];
-      const between = Math.acos(Math.min(1, Math.max(-1, dot(inward[0], inward[1]))));
-      if (between < 1e-6 || Math.PI - between < 1e-6) return undefined;
-      const unitBisector = norm(add(inward[0], inward[1]));
-      // In a concave corner the space between the faces is empty; in a convex one it is the solid.
-      if (k.containsPoint(solid, vec(add(mid, scale(unitBisector, eps))))) return undefined;
-      const reach = r / Math.tan(between / 2);
-      const onA = add(p0, scale(inward[0], reach)), onB = add(p0, scale(inward[1], reach));
-      const arcMid = add(p0, scale(unitBisector, r / Math.sin(between / 2) - r));
-      const profile = k.makeFace(k.makeWire([
-        k.makeLineEdge(vec(p0), vec(onA)),
-        k.makeArcEdge(vec(onA), vec(arcMid), vec(onB)),
-        k.makeLineEdge(vec(onB), vec(p0)),
-      ]));
-      let filler = k.extrude(profile, ...scale(dir, length));
-      sides.forEach((f, i) => {
-        const away = inward[1 - i]!;
-        const data = k.surfaceData(f);
-        if (data.kind !== "plane") throw new Error("not a plane");
-        const n = tuple(data.normal);
-        const out = scale(n, dot(n, away) > 0 ? reach + r : -(reach + r));
-        filler = k.common(filler, k.extrude(f, ...out));
-      });
-      if (this.faces(filler).length === 0) return undefined;
-      fillers.push(filler);
+      const tool = this.runoutTool(solid, edge, r);
+      if (!tool) return undefined;
+      tools[tool.concave ? "fill" : "remove"].push(tool.shape);
     }
-    const ev = k.booleanOp(BooleanOp.Fuse, [solid], fillers, {
-      inputFaceHashes: this.hashes(inputs),
-      hashUpperBound: HASH_BOUND,
+    let result: Evaluated = { shape: solid, tags: new Map(inputs.flatMap((i) => [...i.tags])) };
+    for (const [op, list] of [[BooleanOp.Fuse, tools.fill], [BooleanOp.Cut, tools.remove]] as const) {
+      if (list.length === 0) continue;
+      const ev = k.booleanOp(op, [result.shape], list, { inputFaceHashes: this.hashes([result]), hashUpperBound: HASH_BOUND });
+      result = this.track(n, ev.result, ev, [result]);
+    }
+    return k.isValid(result.shape) && k.getSubShapes(result.shape, "solid").length === 1 ? result : undefined;
+  }
+
+  /**
+   * A section of the fillet swept along one edge. The section is exact only while it keeps its shape, so each face
+   * must be flat, or straight across the edge everywhere, as a wall extruded square to the edge's plane is.
+   */
+  runoutTool(solid: ShapeHandle, edge: ShapeHandle, r: number): { shape: ShapeHandle; concave: boolean } | undefined {
+    const k = this.k;
+    const eps = 1e-3, onFace = 1e-5;
+    const point = (p: Vec3) => k.makeVertex(p[0], p[1], p[2]);
+    const h = this.hash(edge);
+    const sides = this.faces(solid).filter((f) => k.getSubShapes(f, "edge").some((x) => this.hash(x) === h));
+    if (sides.length !== 2) return undefined;
+    const { first, last } = k.curveParameters(edge);
+    const station = (t: number) => {
+      const u = first + (last - first) * t;
+      const p = tuple(k.curvePointAtParam(edge, u)), dir = norm(tuple(k.curveTangent(edge, u)));
+      return { p, dir, across: sides.map((f) => cross(dir, this.normalAt(f, p))) as [Vec3, Vec3] };
+    };
+    const inner = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => station(i / 10));
+    const mid = inner[4]!;
+    // Which way across the edge each face lies. It holds along the edge, and ends can sit on a curved outline.
+    const signs = sides.map((f, i) =>
+      k.distanceBetween(f, point(add(mid.p, scale(mid.across[i]!, eps)))) < eps / 1000 ? 1 : -1);
+    const inward = (s: { across: [Vec3, Vec3] }, i: number) => scale(s.across[i]!, signs[i]!);
+    const angleAt = (s: { across: [Vec3, Vec3] }) => Math.acos(Math.min(1, Math.max(-1, dot(inward(s, 0), inward(s, 1)))));
+    const between = angleAt(mid);
+    if (between < 1e-6 || Math.PI - between < 1e-6) return undefined;
+    for (const s of inner) {
+      if (Math.abs(angleAt(s) - between) > 1e-6) return undefined;
+      for (let i = 0; i < 2; i++) {
+        if (k.surfaceType(sides[i]!) === "plane") continue;
+        if (Math.hypot(...sub(inward(s, i), inward(mid, i))) > 1e-6) return undefined;
+      }
+    }
+    const reach = r / Math.tan(between / 2);
+    // Too big a radius fits nowhere, and a face curved across the edge is off the tangent point everywhere.
+    const fits = inner.find((s) => sides.every((f, i) => k.distanceBetween(f, point(add(s.p, scale(inward(s, i), reach)))) < onFace));
+    if (!fits) return undefined;
+    const bisector = norm(add(inward(fits, 0), inward(fits, 1)));
+    // In a concave corner the space between the faces is empty; in a convex one it is the solid.
+    const concave = !k.containsPoint(solid, vec(add(fits.p, scale(bisector, eps))));
+
+    const start = station(0);
+    const [a, b] = [inward(start, 0), inward(start, 1)] as [Vec3, Vec3];
+    const onA = add(start.p, scale(a, reach)), onB = add(start.p, scale(b, reach));
+    const arcMid = add(start.p, scale(norm(add(a, b)), r / Math.sin(between / 2) - r));
+    const section = k.makeFace(k.makeWire([
+      k.makeLineEdge(vec(start.p), vec(onA)),
+      k.makeArcEdge(vec(onA), vec(arcMid), vec(onB)),
+      k.makeLineEdge(vec(onB), vec(start.p)),
+    ]));
+    let shape = k.curveType(edge) === "line"
+      ? k.extrude(section, ...scale(start.dir, k.curveLength(edge)))
+      : k.pipe(section, k.makeWire([edge]));
+    sides.forEach((f, i) => {
+      const away = inward(fits, 1 - i);
+      const normal = this.normalAt(f, fits.p);
+      const size = dot(normal, away) > 0 ? reach + r : -(reach + r);
+      const footprint = k.surfaceType(f) === "plane" ? k.extrude(f, ...scale(normal, size)) : k.thicken(f, size, 1e-3);
+      shape = k.common(shape, footprint);
     });
-    return k.isValid(ev.result) ? ev : undefined;
+    return this.faces(shape).length === 0 ? undefined : { shape, concave };
   }
 
   /** One edge per profile segment, in order. */

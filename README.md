@@ -27,6 +27,15 @@ export const Plate = part("Plate", (p: { hole: number }) => ({
 }));
 ```
 
+Sketch on a named face, sweep along a spine, or loft through sections.
+
+```ts
+const base = box(40, 20, 5).named("base");
+const post = extrude(circle(3), 10, onFace(base, "base.top")).named("post");
+const pipe = sweep(circle(1), spine([0, 0, 0]).line([0, 0, 20]).tangentArc([0, 10, 30])).named("pipe");
+const neck = loft([{ profile: rect(20, 20), on: plane([0, 0, 0]) }, { profile: circle(5), on: plane([0, 0, 30]) }]).named("neck");
+```
+
 Joints make an assembly move. Drag a joint's slider in the app, or set a pose from the CLI with `--pose pan=30`. `vibecad test` checks `noCollision` across the joint's range.
 
 ```ts

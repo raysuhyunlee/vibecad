@@ -405,7 +405,7 @@ let nextId = 1;
 let opCounts = new Map<string, number>();
 
 export type OpName =
-  | "box" | "cylinder" | "cone" | "sphere" | "extrude" | "revolve" | "importStep"
+  | "box" | "cylinder" | "cone" | "sphere" | "extrude" | "revolve" | "sweep" | "loft" | "importStep"
   | "union" | "cut" | "intersect"
   | "fillet" | "chamfer" | "shell"
   | "translate" | "rotate" | "mirror";
@@ -515,13 +515,95 @@ export function plane(at: Vec3, z: Axis | Vec3 = "z", x?: Axis | Vec3): Plane {
   return xv ? { at, z: zv, x: xv } : { at, z: zv };
 }
 
+/** A sketch plane on a flat face of a solid, resolved when the model builds. */
+export interface FaceRef {
+  solid: Solid;
+  face: string;
+  x?: Vec3;
+  at?: Pt;
+}
+/**
+ * Sketches on a named flat face. +z points out of the solid and the origin is the center of the face's outline.
+ * `at` moves the origin in sketch units, and x works as in plane. A sweep into the solid has a negative height.
+ */
+export function onFace(solid: Solid, face: string, opts: { x?: Axis | Vec3; at?: Pt } = {}): FaceRef {
+  return { solid, face, ...(opts.x && { x: toVec(opts.x) }), ...(opts.at && { at: opts.at }) };
+}
+const refInputs = (on: Plane | FaceRef | undefined) => (on && "face" in on ? [on.solid] : []);
+
 /** Faces: top, bottom, and per profile segment its name or side[i]. Extrudes along the plane's +z, by default world Z from z=0. */
-export function extrude(profile: Profile, height: number, on?: Plane): Solid {
-  return new Solid("extrude", { profile, height, on }, []);
+export function extrude(profile: Profile, height: number, on?: Plane | FaceRef): Solid {
+  return new Solid("extrude", { profile, height, on }, refInputs(on));
 }
 /** Faces: start, end when not a full turn, and per profile segment its name or side[i]. The axis is in the sketch's own axes. */
-export function revolve(profile: Profile, axis: Axis = "y", degrees = 360, on?: Plane): Solid {
-  return new Solid("revolve", { profile, axis: toVec(axis), degrees, on }, []);
+export function revolve(profile: Profile, axis: Axis = "y", degrees = 360, on?: Plane | FaceRef): Solid {
+  return new Solid("revolve", { profile, axis: toVec(axis), degrees, on }, refInputs(on));
+}
+
+export type SpineSegment =
+  | { t: "line"; to: Vec3 }
+  | { t: "arc"; through: Vec3; to: Vec3 }
+  | { t: "tangentArc"; to: Vec3 }
+  | { t: "spline"; through: Vec3[] };
+/** An open 3D curve for a sweep to follow. Each step continues from the last point. */
+export class Spine {
+  readonly start: Vec3;
+  readonly segments: SpineSegment[] = [];
+  constructor(start: Vec3) {
+    this.start = start;
+  }
+  line(to: Vec3) {
+    this.segments.push({ t: "line", to });
+    return this;
+  }
+  /** An arc through one point to another. */
+  arc(through: Vec3, to: Vec3) {
+    this.segments.push({ t: "arc", through, to });
+    return this;
+  }
+  /** An arc to a point, tangent to the previous segment. */
+  tangentArc(to: Vec3) {
+    if (this.segments.length === 0) throw new Error("spine: tangentArc needs a segment before it to be tangent to");
+    this.segments.push({ t: "tangentArc", to });
+    return this;
+  }
+  /** A smooth curve through the points, ending at the last one. */
+  spline(through: Vec3[]) {
+    if (through.length < 2) throw new Error("spine: spline needs at least 2 points; use line for one");
+    this.segments.push({ t: "spline", through });
+    return this;
+  }
+}
+/** Starts a spine at a point. See Spine. */
+export function spine(start: Vec3) {
+  return new Spine(start);
+}
+export interface Helix {
+  radius: number;
+  pitch: number;
+  height: number;
+  left: boolean;
+}
+/** A helix about +z, starting at [radius, 0, 0]. Right-handed unless left is set. */
+export function helix(radius: number, pitch: number, height: number, opts: { left?: boolean } = {}): Helix {
+  if (!(radius > 0 && pitch > 0 && height > 0)) throw new Error("helix: radius, pitch and height must be positive");
+  return { radius, pitch, height, left: opts.left ?? false };
+}
+/**
+ * Sweeps a profile along a spine. The sketch's origin sits on the spine's start, with +z along the spine,
+ * and x works as in plane. Faces: start, end, and per profile segment its name or side[i], with ~2 for each further spine segment.
+ */
+export function sweep(profile: Profile, along: Spine | Helix, opts: { x?: Axis | Vec3 } = {}): Solid {
+  if (along instanceof Spine && along.segments.length === 0) throw new Error("sweep: the spine has no segments");
+  return new Solid("sweep", { profile, spine: along, x: opts.x && toVec(opts.x) }, []);
+}
+/**
+ * Blends through two or more sections, smoothly unless ruled is set, which makes straight walls between sections.
+ * Faces: start, end, and per segment of the first section its name or side[i].
+ */
+export function loft(sections: Array<{ profile: Profile; on: Plane | FaceRef }>, opts: { ruled?: boolean } = {}): Solid {
+  if (sections.length < 2) throw new Error(`loft: needs at least 2 sections, got ${sections.length}`);
+  return new Solid("loft", { sections, ruled: opts.ruled ?? false }, sections.flatMap((s) => refInputs(s.on)));
 }
 /** Loads a STEP file, relative to the calling source file. Faces: face[i], in file order. */
 export function importStep(file: string): Solid {
