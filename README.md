@@ -13,18 +13,19 @@ node src/cli.ts dev   # open the printed URL
 
 Open a project folder in the app, for example `examples/servo-bracket`, and pick a file. Click a face, hold Space and talk, or type. `D` draws, `F` fits, `Esc` clears.
 
-Settings live in `~/.vibecad/config.json`: `port`, `agent`, `model`, `keepMb`.
+Settings live in `~/.vibecad/config.json`: `port`, `agent`, `model`.
 
 ## A part
 
-Modeling files are named `*.cad.ts` and default-export what they show. A part with required params exports a preview, for example `export default () => Plate({ hole: 3 })`. Other `.ts` files are plain code. STEP files open directly in the app, and `importStep("motor.step")` brings one into a part.
+A part or an assembly is one instance, something you produce. A factory is the code that makes them. A modeling file, `*.cad.ts`, is one instance: its default export. Other `.ts` files are plain code, such as factories several instances share. STEP files open directly in the app, and `importStep("motor.step")` brings one into a part.
 
 ```ts
-export const Plate = part("Plate", (p: { hole: number }) => ({
+const Plate = part("Plate", (p: { hole: number }) => ({
   solid: box(40, 20, 5).named("base")
     .cut(cylinder(p.hole, 10).named("bore").translate(0, 0, -1)),
   ports: { top: port([0, 0, 5]) },
 }));
+export default Plate({ hole: 3 });
 ```
 
 Sketch on a named face, sweep along a spine, or loft through sections.
@@ -36,11 +37,7 @@ const pipe = sweep(circle(1), spine([0, 0, 0]).line([0, 0, 20]).tangentArc([0, 1
 const neck = loft([{ profile: rect(20, 20), on: plane([0, 0, 0]) }, { profile: circle(5), on: plane([0, 0, 30]) }]).named("neck");
 ```
 
-An entry can declare options to switch in the app, or with `--option side=right`. The first value is the default.
-
-```ts
-export default options({ side: ["left", "right"] }, (o) => Leg(o));
-```
+An assembly imports other files' instances, `import plate from "./plate.cad.ts"`, and `place(plate)` places one again. Each part is built once and kept in `.vibecad/builds`, so an assembly reuses it.
 
 Joints make an assembly move. Drag a joint's slider in the app, or set a pose from the CLI with `--pose pan=30`. `vibecad test` checks `noCollision` across the joint's range.
 
@@ -56,6 +53,7 @@ src/       language, evaluator, CLI, preview server, agent adapters
 viewer/    live preview
 examples/  sample projects
 spec/      specifications
+docs/      tutorials
 test/      tests
 ```
 
@@ -64,3 +62,4 @@ test/      tests
 | Document | Ownership |
 | --- | --- |
 | `spec/overview.md` | Tech spec: principles, stack, language, feedback loop, sessions |
+| `docs/tutorial.md` | Modeling tutorial for agents: project layout, instances and factories |

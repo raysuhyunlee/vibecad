@@ -6,9 +6,10 @@
 
 - occt kernel, pinned as wasm: same binary and geometry on every OS
 - declarative: code is pure TypeScript that returns a feature graph; only `src/eval.ts` touches the kernel
-- object oriented: a part is a typed factory, params are its dimension interface, ports are its connections
-- files are modules: parts and assemblies import each other
-- `*.cad.ts` marks a modeling file and needs a default export, so every one can be built and viewed alone
+- a part or an assembly is one instance, made to be produced, so a project has a finite set of them; a factory is the code that makes them
+- object oriented: a factory is typed, params are its dimension interface, ports are its connections
+- one file, one instance: a `*.cad.ts` file default-exports one part or assembly, so every one can be built and viewed alone
+- files are modules: assemblies import the instances of other `*.cad.ts` files; factories live in plain `.ts` files
 - everything is a function: built-in features and user functions have the same shape
 - agent first: every capability is a CLI command that prints JSON; errors carry code, source line and hint
 - the CLI takes actions; settings live in `~/.vibecad/config.json`
@@ -59,14 +60,17 @@
 - bad geometry stops at the call: an arc end off its circle, a round that does not fit or has no corner
 - `outerTangent(c1, r1, c2, r2, side)` gives the touch points of a line tangent to two circles
 - features: `union cut intersect fillet chamfer shell translate rotate mirror`
-- structure: `part assembly port mate revolute slider named`
+- structure: `part assembly port mate revolute slider named place`; `part` and `assembly` define factories, and each call makes one instance
 - links: mates and joints join parts into one tree, growing from the ground, or else the first part; a closed loop is `OVER_CONSTRAINED`
 - ground: an assembly's `ground: mate(world, port)` fixes that part facing the world frame (origin, +z up, x along +X), with `gap` and `angle` as in a mate; only the entry's ground counts, and `world` anywhere else is `BAD_MATE`
 - joints: `revolute(a, b, { angle, min, max, gap })`, default range -180 to 180; `slider(a, b, { min, max, travel, angle })`; both are named in an assembly's `joints`
 - a joint's value lives in the source; `--pose` and the viewer only override it. Its path is `sub/name`, and a value outside its range is an error
 - a positive angle turns the moving part about its own port's +z; a positive travel separates the ports along the fixed port's +z
-- default export: an instance, or a function returning one; a part with required params exports a preview, `export default () => Part({ ... })`
-- options: `export default options({ side: ["left", "right"] }, (o) => Leg(o))` declares choices the app and `--option` can switch; the first value is the default, and an unknown name or value is `BAD_OPTION`
+- instance: a `.cad.ts` file's default export, `export default Bracket({ ... })`; without one it is `BAD_ENTRY`, and a second exported instance is `MANY_INSTANCES`
+- a factory used by one instance can stay unexported in its file; one shared by several goes in a plain `.ts` file
+- an assembly places only `.cad.ts` files' instances, at every depth, else `NOT_EXPORTED`
+- `place(x)` places an instance again; the same one twice in one assembly is `PLACED_TWICE`
+- mates, joints and checks name the places of their own assembly; a joint's path is the place path, so a placed assembly's joints are each its own
 - rules: `check minClearance noOverlap`, run on every build
 - sweeps: `noCollision(a, b, { joint, steps })` samples a joint's range, only in `vibecad test`, and reports the first failing value; collisions between samples can be missed
 - a check reads other poses with `q.at(joint, value)`
@@ -82,7 +86,15 @@
 ## cli
 
 - `build test query render export diff dev show`, see `vibecad --help`
-- `--pose joint=value,...` sets joint values for any command that builds, except `diff` and `dev`; `--option name=value,...` picks the entry's options the same way
+- `--pose joint=value,...` sets joint values for any command that builds, except `diff` and `dev`
+- `build` writes the file's kept build; a posed build is not the source's instance, so it goes to `.vibecad/out`
+
+## builds
+
+- each file's build is kept in `.vibecad/builds/<file>/` until someone deletes it; a part's also holds its solid as BRep
+- an assembly reuses the kept build of each part while it is fresh, and builds and keeps the rest; sub-assemblies at any depth compose from the same part builds, and each part is built once however often it is placed
+- each build records what it read in `inputs.json`: a content digest of the file and every file it imports, any STEP file it loads, and vibecad's own source, and whether it has feature meshes; a build is fresh while all of them match
+- the app and the CLI share kept builds, so an agent's build serves the app too
 - `render --labels` draws all six views and iso with a number on each face, and prints each number's part, face id and views, plus the faces no view can see
 - each face is tagged in the view that shows it best, moved aside with a leader line when crowded, and in other views where its tag fits
 - the PNG holds only numbers because the kernel's bitmap font lacks many letters; it reads the kernel package's layout and font files, so a kernel upgrade must recheck this
@@ -90,7 +102,7 @@
 ## settings
 
 - `~/.vibecad/config.json`, per user because the app starts before any project opens; read when the app starts
-- `port` (4173), `agent` (`claude`), `model` (agent default), `keepMb` (512)
+- `port` (4173), `agent` (`claude`), `model` (agent default)
 - every key is optional; an unknown key or a bad value stops the app with an error
 
 ## app and projects
@@ -101,24 +113,23 @@
 - one app serves one project: the server's working directory is the root, and builds, agents and `.vibecad/` resolve against it
 - the left panel lists the root's `*.cad.ts` and STEP files, skipping dot folders and `node_modules`, and updates as files change
 - selecting a file opens it in a tab; a project opens on `main.cad.ts` when it has one
-- a tab keeps its last good build until it closes, so switching tabs renders at once
-- kept builds have a limit, `keepMb`, measured on build output; over it, the longest unseen build is dropped, and that tab rebuilds when shown; the tab on screen is never dropped
-- pins, the draft message, the pose and the camera stay with their tab until it closes, even when its build is dropped; a pin goes when its face no longer exists
+- a tab shows a fresh kept build without a rebuild, so a file reopened after a restart renders at once
+- a tab shown with an out-of-date build does not show it: it builds as if for the first time
+- only the tab on screen holds its build in memory; the others read theirs from disk when shown
+- pins, the draft message, the pose and the camera stay with their tab until it closes, even when its build is out of date; a pin goes when its face no longer exists
 - a message carries only the pins of the tab it is sent from
-- only the tab on screen builds; saving any `.ts` marks the others stale, and they rebuild behind the kept model when shown
+- only the tab on screen builds; a save rebuilds it over the kept model, unless its build is still fresh
 - stopping the app stops its running build; a build whose working directory is gone fails with `NO_WORKING_DIR`
-- preview builds write to `.vibecad/preview`, so an agent's own build in `.vibecad/out` cannot land in a tab
 - other `.ts` files are plain code: not listed, but saving one rebuilds
 - the left panel has a slider per joint; moving one changes the view without a rebuild, using the joint data in `model.json`, and never writes the source
 - the viewer's pose stays with its tab through rebuilds; a message carries the joints moved away from the source
-- the left panel has a select per entry option; picking one rebuilds the tab with it and never writes the source; the selects are locked with a spinner while the tab builds; the pick stays with its tab, a message carries it, and a pick the source no longer has falls back to the defaults
 - while the tab on screen builds, the view says so, the same for a first build and a rebuild over the kept model
 - a tab's first build fits the camera to the model; a rebuild keeps the camera unless the model's bounds change, then fits again keeping the view direction
 - drag orbits; right drag or shift-drag pans; on a trackpad two-finger scroll pans and pinch zooms, and a mouse wheel zooms
 - a view cube in the corner turns with the camera and shows the world axes; side labels read upright with +Z up, top and bottom with +Y up, and the camera matches; clicking a face, named like `render`'s views, an edge or a corner turns the camera to look from that side, keeping target and distance
 - the agent session survives a file switch, and each message names the file being viewed
 - opening another project is refused while the agent runs
-- the browser remembers the last project and its tabs, and reopens them on start; a reopened tab builds when first shown
+- the browser remembers the last project and its tabs, and reopens them on start; a reopened tab loads its build from disk when first shown, and builds only if it is out of date
 - projects anywhere on disk import the language as `"vibecad"`; the CLI resolves it
 
 ## friction-free human-agent feedback loop
@@ -136,6 +147,7 @@
 ## agent sessions
 
 - the preview starts one agent turn per message, prompt through stdin
+- the first prompt points the agent at `AGENTS.md` and `docs/tutorial.md`
 - vibecad owns its sessions and never touches the person's open terminal sessions
 - one session per agent per git branch, in gitignored `.vibecad/sessions.json`
 - a session is a disposable cache: durable decisions live in code, commits and `AGENTS.md`
@@ -174,3 +186,5 @@
 - 2026-11-10: tint the selected and hovered part from the parts list
 - 2026-11-10: ground an assembly on the world frame
 - 2026-11-10: add entry options, switched from the app or `--option`
+- 2026-11-10: keep each build on disk; drop `keepMb`
+- 2026-11-10: a part or assembly is an instance, and a `.cad.ts` file is one, replacing options; assemblies place files' instances and reuse their kept builds

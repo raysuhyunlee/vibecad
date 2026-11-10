@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { AgentRunner, cliCommand } from "./agent.ts";
 import { CONFIG_FILE } from "./config.ts";
 import type { FaceInfo, Model } from "./eval.ts";
-import { ensureDir } from "./fs.ts";
+import { buildDir, ensureDir, isFresh } from "./fs.ts";
 import { STEP_FILE } from "./lang.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -17,7 +17,7 @@ const VIEWER = resolve(HERE, "../viewer");
 const THREE_ROOT = resolve(dirname(fileURLToPath(import.meta.resolve("three"))), "..");
 const MAX_BODY = 32 * 1024 * 1024;
 const DEV_FILE = ".vibecad/dev.json";
-const PREVIEW_DIR = ".vibecad/preview"; // apart from the agent's own builds in .vibecad/out
+const TUTORIAL = resolve(HERE, "../docs/tutorial.md");
 const MAX_FILES = 2000; // keeps an accidental open of a huge folder responsive
 const MAX_DIRS = 5000;
 const ENTRY_SUFFIX = ".cad.ts";
@@ -28,16 +28,12 @@ const MIME: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
 };
 
-/** An open file. It keeps its last good build until it closes or the keep limit drops it. */
+/** An open file. Its build lives on disk; only the tab on screen holds it in memory. */
 interface Tab {
-  version: number; // 0 while no build is kept
-  stale: boolean; // source may have changed since the last build
-  leftAt: number; // when it was last on screen, to drop the longest unseen build first
-  size: number; // bytes of build output kept
+  version: number; // 0 while the tab has no fresh build
   model?: Model;
   meshes?: string;
   error?: unknown;
-  options: Record<string, string>; // choices the person picked in the app; never written to the source
 }
 interface Ref {
   n: number;
@@ -50,14 +46,7 @@ interface Feedback {
   entry: string;
   refs: string[];
   pose?: string;
-  options?: string;
   screenshot?: string;
-}
-
-/** `name=value,...` for `--option`, or undefined when nothing is picked. */
-function optionFlag(options: Record<string, string> | undefined) {
-  const items = Object.entries(options ?? {}).map(([k, v]) => `${k}=${v}`);
-  return items.length ? items.join(",") : undefined;
 }
 
 /** True when `child` is inside `root`, so a request cannot read outside it. */
@@ -91,7 +80,6 @@ function listFiles() {
 }
 
 export async function serve(o: {
-  keepBytes: number;
   port: number;
   agent: string;
   model?: string;
@@ -108,7 +96,6 @@ export async function serve(o: {
   let project: ReturnType<typeof listFiles> = { files: [], truncated: false };
   let watcher: FSWatcher | undefined;
   const tabs = new Map<string, Tab>();
-  let leaveCount = 0;
   let version = 0;
   let feedbackId = 0;
 
@@ -139,21 +126,23 @@ export async function serve(o: {
     log, running: agent.running, queued: queue.length, agent: o.agent,
   });
 
-  /** Drops the longest unseen builds over the limit. The tab on screen always keeps its build. */
-  const enforceKeepLimit = () => {
-    let total = 0;
-    for (const t of tabs.values()) total += t.size;
-    const droppable = [...tabs].filter(([file, t]) => t.model && file !== entry).sort(([, a], [, b]) => a.leftAt - b.leftAt);
-    for (const [, t] of droppable) {
-      if (total <= o.keepBytes) break;
-      total -= t.size;
-      t.model = t.meshes = undefined;
-      t.size = t.version = 0;
-      t.stale = true;
+  // --- Builds ---------------------------------------------------------------
+  /** The file's build on disk. Throws when there is none. */
+  const readBuild = (file: string) => {
+    const dir = buildDir(file);
+    return { model: JSON.parse(readFileSync(`${dir}/model.json`, "utf8")) as Model, meshes: readFileSync(`${dir}/meshes.json`, "utf8") };
+  };
+  /** The tab's build, from memory or else from disk, while nothing it read has changed. */
+  const freshBuild = (file: string, tab: Tab) => {
+    if (!isFresh(buildDir(file), true)) return undefined;
+    if (tab.model && tab.meshes) return { model: tab.model, meshes: tab.meshes };
+    try {
+      return readBuild(file);
+    } catch {
+      return undefined;
     }
   };
 
-  // --- Builds ---------------------------------------------------------------
   let building: ChildProcess | undefined;
   let buildingFile: string | undefined;
   // A build must not outlive the app. Left running, it can lose its project folder too.
@@ -166,8 +155,7 @@ export async function serve(o: {
     const file = entry;
     if (!file) return;
     building?.kill();
-    const chosen = optionFlag(tabs.get(file)?.options);
-    const args = [CLI, "build", file, "--steps", "--out-dir", PREVIEW_DIR, ...(chosen ? ["--option", chosen] : [])];
+    const args = [CLI, "build", file, "--steps"];
     const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "ignore"] });
     building = child;
     buildingFile = file;
@@ -179,47 +167,56 @@ export async function serve(o: {
       building = buildingFile = undefined;
       const tab = tabs.get(file);
       if (!tab) return;
-      tab.stale = false;
       try {
         const r = JSON.parse(out);
         if (r.ok) {
-          const modelText = readFileSync(`${PREVIEW_DIR}/model.json`, "utf8");
-          tab.model = JSON.parse(modelText);
-          tab.meshes = readFileSync(`${PREVIEW_DIR}/meshes.json`, "utf8");
-          tab.size = modelText.length + tab.meshes.length;
+          Object.assign(tab, readBuild(file));
           tab.version = ++version;
           tab.error = undefined;
-        } else if (r.error?.code === "BAD_OPTION" && chosen) {
-          // The source no longer has a picked choice: drop the picks and build its defaults.
-          tab.options = {};
-          return runBuild();
         } else tab.error = r.error;
       } catch {
         tab.error = { code: "BUILD_CRASHED", message: "The build process crashed. Run vibecad build for details." };
       }
-      enforceKeepLimit();
       emit({ type: "entry", ...entryState() });
     });
   };
+  /** Rebuilds the tab on screen after a save, unless nothing its build read has changed. */
   const scheduleBuild = () => {
     clearTimeout(timer);
-    timer = setTimeout(runBuild, 120);
+    timer = setTimeout(() => {
+      const tab = entry ? tabs.get(entry) : undefined;
+      if (tab && (building || !freshBuild(entry!, tab))) runBuild();
+    }, 120);
   };
 
   // --- Project --------------------------------------------------------------
-  const newTab = (): Tab => ({ version: 0, stale: true, leftAt: 0, size: 0, options: {} });
-  /** Shows a tab, opening it if needed. Only a tab that may be out of date builds. */
+  const newTab = (): Tab => ({ version: 0 });
+  /**
+   * Shows a tab, opening it if needed. A fresh build on disk shows at once. An out-of-date one is
+   * not shown: the tab builds as if for the first time, except the tab already on screen keeps its view.
+   */
   const switchTo = (next: string | undefined) => {
     clearTimeout(timer);
     const left = entry ? tabs.get(entry) : undefined;
-    if (left) left.leftAt = ++leaveCount;
     entry = next;
     if (next && !tabs.has(next)) tabs.set(next, newTab());
-    enforceKeepLimit();
-    if (buildingFile === next) return;
+    const tab = next ? tabs.get(next)! : undefined;
+    if (left && left !== tab) left.model = left.meshes = undefined;
+    if (!tab || buildingFile === next) return;
     building?.kill();
     building = buildingFile = undefined;
-    if (next && tabs.get(next)!.stale) runBuild();
+    const fresh = freshBuild(next!, tab);
+    if (fresh) {
+      Object.assign(tab, fresh);
+      tab.version ||= ++version; // else the same build the viewer may still hold
+      return;
+    }
+    // Only a rebuild of the tab already on screen keeps its view.
+    if (left !== tab) {
+      tab.model = tab.meshes = undefined;
+      tab.version = 0;
+    }
+    runBuild();
   };
   const setEntry = (next: string | undefined) => {
     switchTo(next);
@@ -271,10 +268,7 @@ export async function serve(o: {
     watcher = watch(".", { recursive: true }, (_event, file) => {
       if (!file || file.split(/[\\/]/).some(hiddenName)) return;
       const source = file.endsWith(".ts") || STEP_FILE.test(file);
-      if (source) {
-        for (const tab of tabs.values()) tab.stale = true;
-        scheduleBuild();
-      }
+      if (source) scheduleBuild();
       if (source || !extname(file)) scheduleFiles();
     });
     watcher.on("error", () => {});
@@ -298,14 +292,13 @@ export async function serve(o: {
     const cli = cliCommand();
     const intro = fresh
       ? `You are editing a vibecad model from a person's live feedback. Each message names the entry file they are viewing. ` +
-        `Read AGENTS.md if it exists. Change the TypeScript source, never generated files. ` +
+        `Read AGENTS.md if it exists, and ${TUTORIAL} for how to lay out a project. Change the TypeScript source, never generated files. ` +
         `The preview rebuilds on every save. Verify with \`${cli} build <entry>\` and \`${cli} test <entry>\`. ` +
         `Use \`${cli} render <entry>\` to see the result, add \`--labels\` to number each face and get its name, and use\`${cli} show --part P --face F --message M\` ` +
-        `to point at geometry when you ask the person something. Commands that build take \`--pose joint=value,...\` and \`--option name=value,...\`. Reply in the person's language, briefly.\n\n`
+        `to point at geometry when you ask the person something. Commands that build take \`--pose joint=value,...\`. Reply in the person's language, briefly.\n\n`
       : "";
     const body = batch.map((f) => {
       const lines = [`Viewing: ${f.entry}`, `Person said: ${JSON.stringify(f.text)}`];
-      if (f.options) lines.push(`They picked options in the viewer, without changing the source. Points and the screenshot use them: --option ${f.options}`);
       if (f.pose) lines.push(`They moved joints in the viewer, without changing the source. Points and the screenshot use this pose: --pose ${f.pose}`);
       if (f.refs.length) lines.push("They pointed at (tokens like [1] in the text refer to these):", ...f.refs);
       if (f.screenshot) lines.push(`Screenshot of what they see: ${f.screenshot}`);
@@ -373,10 +366,13 @@ export async function serve(o: {
           return;
         }
         if (path === "/model") {
-          const tab = tabs.get(url.searchParams.get("file") ?? entry ?? "");
-          if (!tab?.model || !tab.meshes) return json(res, { error: "No build yet" }, 404);
+          const file = url.searchParams.get("file") ?? entry ?? "";
+          const tab = tabs.get(file);
+          // A tab off screen serves its build from disk, while it is fresh.
+          const b = tab?.version ? (file === entry ? tab.model && tab.meshes && tab : freshBuild(file, tab)) : undefined;
+          if (!tab || !b) return json(res, { error: "No build yet" }, 404);
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(`{"version":${tab.version},"model":${JSON.stringify(tab.model)},"meshes":${tab.meshes}}`);
+          res.end(`{"version":${tab.version},"model":${JSON.stringify(b.model)},"meshes":${b.meshes}}`);
           return;
         }
         if (path === "/source") {
@@ -429,15 +425,6 @@ export async function serve(o: {
         setEntry(next);
         return json(res, { ok: true });
       }
-      if (path === "/options") {
-        const b = JSON.parse(await readBody(req));
-        const tab = tabs.get(String(b.file));
-        if (!tab) return json(res, { error: "That file is not open." }, 400);
-        tab.options = Object.fromEntries(Object.entries(b.options ?? {}).map(([k, v]) => [k, String(v)]));
-        tab.stale = true;
-        if (b.file === entry) runBuild();
-        return json(res, { ok: true });
-      }
       if (path === "/tab/close") {
         closeTab(String(JSON.parse(await readBody(req)).file));
         return json(res, { ok: true });
@@ -456,8 +443,6 @@ export async function serve(o: {
         const feedback: Feedback = { text, entry, refs: refs.map(describeRef) };
         const pose = Object.entries(b.pose ?? {}).filter(([, v]) => Number.isFinite(v)).map(([j, v]) => `${j}=${v}`);
         if (pose.length) feedback.pose = pose.join(",");
-        const options = optionFlag(tabs.get(entry)?.options);
-        if (options) feedback.options = options;
         if (typeof b.screenshot === "string" && b.screenshot.startsWith("data:image/png;base64,")) {
           ensureDir(".vibecad/feedback");
           feedback.screenshot = `.vibecad/feedback/${Date.now()}-${id}.png`;

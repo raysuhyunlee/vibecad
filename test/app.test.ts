@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -148,12 +148,13 @@ test("a tab keeps its build, and rebuilds only after a save", async () => {
   assert.equal(model.parts[0].type, "B");
 
   const version = before.tabs[1].version;
-  writeFileSync(join(root, "parts/helper.ts"), "export const size = 2;\n");
+  // A save to a file the tab's build read makes it stale.
+  writeFileSync(join(root, "parts/other.cad.ts"), `import { box, part } from "vibecad";\nexport default part("B", () => ({ solid: box(4, 4, 5).named("b"), ports: {} }))({});\n`);
   await new Promise((ok) => setTimeout(ok, 400));
   await waitBuilt("main.cad.ts");
   assert.equal((await post("/entry", { file: "parts/other.cad.ts" })).status, 200);
   const shown: any = await nextEvent((e) => e.type === "hello");
-  assert.equal(shown.built, true, "the last build stays while it rebuilds");
+  assert.equal(shown.built, false, "an out-of-date build is not shown");
   for (let i = 0; ; i++) {
     const e: any = await nextEvent((x) => x.type === "hello");
     if (!e.building && e.tabs[1].version > version) break;
@@ -192,41 +193,57 @@ test("a STEP file opens directly, has no source panel, and rebuilds on save", as
   assert.equal((await fetch(`${URL_BASE}/source?file=${file}`)).status, 404);
 
   exportTo("parts/other.cad.ts");
-  for (let i = 0; String((await part())?.bbox.size) !== "4,4,4"; i++) {
+  for (let i = 0; String((await part())?.bbox.size) !== "4,4,5"; i++) {
     assert.ok(i < 100, "saving the STEP file did not rebuild");
     await new Promise((ok) => setTimeout(ok, 100));
   }
   assert.equal((await post("/tab/close", { file: "Part One.STEP" })).status, 200);
 });
 
-test("the keep limit drops the longest unseen build, and that tab rebuilds when shown", async () => {
+test("a build stays on disk, and shows at once after a restart while it is fresh", async () => {
   const small = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-keep-")));
   const source = (name: string) => `import { box, part } from "vibecad";\nexport default part("${name}", () => ({ solid: box(1, 1, 1).named("a"), ports: {} }))({});\n`;
   writeFileSync(join(small, "a.cad.ts"), source("A"));
   writeFileSync(join(small, "b.cad.ts"), source("B"));
   const port = PORT + 1;
   const base = `http://127.0.0.1:${port}`;
-  const limited = startApp({ port, keepMb: 0 });
-  await new Promise((ok) => limited.stdout.once("data", ok));
+  const postTo = (path: string, body: unknown) => fetch(base + path, { method: "POST", body: JSON.stringify(body) });
+  const shown = async (file: string) => {
+    for (let i = 0; i < 100; i++) {
+      const res = await fetch(`${base}/model?file=${file}`);
+      if (res.ok) return ((await res.json()) as any).model.parts[0].type;
+      await new Promise((ok) => setTimeout(ok, 100));
+    }
+    assert.fail(`${file} did not build`);
+  };
+  /** Starts the app, opens the project on `file`, and returns the status of /model right after. */
+  const reopen = async (file: string, run: () => Promise<void>) => {
+    const app = startApp({ port });
+    await new Promise((ok) => app.stdout.once("data", ok));
+    try {
+      await postTo("/project", { path: small, entry: file, tabs: ["a.cad.ts", "b.cad.ts"] });
+      await run();
+    } finally {
+      const gone = new Promise((ok) => app.once("close", ok));
+      app.kill();
+      await gone;
+    }
+  };
   try {
-    const postTo = (path: string, body: unknown) => fetch(base + path, { method: "POST", body: JSON.stringify(body) });
-    const shown = async (file: string) => {
-      for (let i = 0; i < 100; i++) {
-        const res = await fetch(`${base}/model?file=${file}`);
-        if (res.ok) return ((await res.json()) as any).model.parts[0].type;
-        await new Promise((ok) => setTimeout(ok, 100));
-      }
-      assert.fail(`${file} did not build`);
-    };
-    await postTo("/project", { path: small, entry: "a.cad.ts" });
-    assert.equal(await shown("a.cad.ts"), "A");
-    await postTo("/entry", { file: "b.cad.ts" });
-    assert.equal(await shown("b.cad.ts"), "B");
-    assert.equal((await fetch(`${base}/model?file=a.cad.ts`)).status, 404, "the unseen build is dropped");
-    await postTo("/entry", { file: "a.cad.ts" });
-    assert.equal(await shown("a.cad.ts"), "A");
+    await reopen("a.cad.ts", async () => {
+      assert.equal(await shown("a.cad.ts"), "A");
+      await postTo("/entry", { file: "b.cad.ts" });
+      assert.equal(await shown("b.cad.ts"), "B");
+      assert.equal(await shown("a.cad.ts"), "A", "a tab off screen serves its build from disk");
+    });
+    writeFileSync(join(small, "b.cad.ts"), source("C"));
+    await reopen("a.cad.ts", async () => {
+      assert.equal((await fetch(`${base}/model?file=a.cad.ts`)).status, 200, "a fresh build shows at once");
+      await postTo("/entry", { file: "b.cad.ts" });
+      assert.equal((await fetch(`${base}/model?file=b.cad.ts`)).status, 404, "an out-of-date build is not shown");
+      assert.equal(await shown("b.cad.ts"), "C");
+    });
   } finally {
-    limited.kill();
     rmSync(small, { recursive: true, force: true });
   }
 });
@@ -269,7 +286,7 @@ export default part("S", () => box(1, 1, 1))();
 });
 
 test("a bad setting stops the app and names the file", async () => {
-  for (const [config, text] of [[{ keepMb: -1 }, "keepMb"], [{ typo: 1 }, "typo"]] as const) {
+  for (const [config, text] of [[{ port: -1 }, "port"], [{ typo: 1 }, "typo"]] as const) {
     const child = startApp(config);
     let out = "";
     child.stdout.on("data", (d) => (out += d));
@@ -287,31 +304,40 @@ test("settings are not CLI flags", () => {
   assert.equal(JSON.parse(r.stdout).ok, false);
 });
 
-test("an entry's options switch from the CLI and the app, and a stale pick falls back to the default", async () => {
-  const leg = (values: string) =>
-    `import { box, options, part } from "vibecad";\n` +
-    `const Leg = part("Leg", (p: { side: string }) => box(1, 1, 1).named("leg").translate(p.side === "right" ? 10 : -10, 0, 0));\n` +
-    `export default options({ side: [${values}] }, (o) => Leg(o));\n`;
-  writeFileSync(join(root, "leg.cad.ts"), leg(`"left", "right"`));
-  const cli = (...args: string[]) => JSON.parse(spawnSync(process.execPath, [CLI, "build", "leg.cad.ts", ...args], { cwd: root, encoding: "utf8" }).stdout);
-  assert.deepEqual(cli("--option", "side=right").options, [{ name: "side", values: ["left", "right"], value: "right" }]);
-  assert.equal(cli("--option", "side=up").error.code, "BAD_OPTION");
-  assert.equal(cli("--option", "foot=x").error.code, "BAD_OPTION");
+test("a file is one instance; an assembly places only files' instances, builds each part once, and keeps its build", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-cascade-")));
+  try {
+    const block = `import { box, part, port } from "vibecad";\n` +
+      `const Block = part("Block", (p: { h: number }) => ({ solid: box(10, 10, p.h).named("b"), ports: { top: port([0, 0, p.h]), bottom: port([0, 0, 0], [0, 0, -1]) } }));\n`;
+    writeFileSync(join(dir, "block.cad.ts"), block + `export default Block({ h: 2 });\n`);
+    writeFileSync(join(dir, "main.cad.ts"),
+      `import { assembly, mate, place } from "vibecad";\nimport block from "./block.cad.ts";\n` +
+      `export default assembly("Stack", () => {\n  const a = block, b = place(block);\n` +
+      `  return { parts: { a, b }, mates: [mate(a.port("top"), b.port("bottom"))] };\n})();\n`);
+    const cli = (...args: string[]) => JSON.parse(spawnSync(process.execPath, [CLI, ...args], { cwd: dir, encoding: "utf8" }).stdout);
+    const built = cli("build", "main.cad.ts");
+    assert.equal(built.ok, true);
+    assert.deepEqual(built.parts.map((p: any) => p.size[2]), [2, 2]);
+    assert.ok(existsSync(join(dir, ".vibecad/builds/block.cad.ts/shape.brep")), "the part's own build is kept");
+    assert.equal(cli("build", "block.cad.ts").ok, true);
 
-  const minX = async () => (await (await fetch(`${URL_BASE}/model?file=leg.cad.ts`)).json()).model.parts[0].bbox.min[0];
-  const settled = async (want: number) => {
-    for (let i = 0; i < 100; i++) {
-      const e: any = await nextEvent((x) => x.type === "hello");
-      if (!e.building && e.built && (await minX()) === want) return;
-      await new Promise((ok) => setTimeout(ok, 100));
-    }
-    assert.fail(`leg did not build at x=${want}`);
-  };
-  await new Promise((ok) => setTimeout(ok, 400));
-  assert.equal((await post("/entry", { file: "leg.cad.ts" })).status, 200);
-  await settled(-10.5);
-  assert.equal((await post("/options", { file: "leg.cad.ts", options: { side: "right" } })).status, 200);
-  await settled(9.5);
-  writeFileSync(join(root, "leg.cad.ts"), leg(`"left", "middle"`));
-  await settled(-10.5);
+    writeFileSync(join(dir, "loose.cad.ts"),
+      `import { assembly, box, part } from "vibecad";\n` +
+      `export default assembly("Loose", () => ({ parts: { a: part("A", () => box(1, 1, 1))() } }))();\n`);
+    assert.equal(cli("build", "loose.cad.ts").error.code, "NOT_EXPORTED");
+    writeFileSync(join(dir, "twice.cad.ts"),
+      `import { assembly } from "vibecad";\nimport block from "./block.cad.ts";\n` +
+      `export default assembly("Twice", () => ({ parts: { a: block, b: block } }))();\n`);
+    assert.equal(cli("build", "twice.cad.ts").error.code, "PLACED_TWICE");
+    writeFileSync(join(dir, "two.cad.ts"), block + `export const low = Block({ h: 1 });\nexport default Block({ h: 2 });\n`);
+    assert.equal(cli("build", "two.cad.ts").error.code, "MANY_INSTANCES");
+    writeFileSync(join(dir, "none.cad.ts"), block + `export const low = Block({ h: 1 });\n`);
+    assert.equal(cli("build", "none.cad.ts").error.code, "BAD_ENTRY");
+
+    // A changed part rebuilds; the assembly picks it up.
+    writeFileSync(join(dir, "block.cad.ts"), block + `export default Block({ h: 3 });\n`);
+    assert.deepEqual(cli("build", "main.cad.ts").parts.map((p: any) => p.size[2]), [3, 3]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

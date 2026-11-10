@@ -797,7 +797,7 @@ export const world: PortRef = {
 
 type Args<P> = {} extends P ? [params?: P] : [params: P];
 
-/** Defines a part type. Params are its dimension interface; ports its connections. */
+/** Defines a part factory. Params are its dimension interface; ports its connections. Each call makes one part. */
 export function part<P extends object, K extends string = never>(
   typeName: string,
   build: (params: P) => Solid | { solid: Solid; ports?: Record<K, PortDef>; checks?: CheckDef[] },
@@ -822,23 +822,23 @@ export function part<P extends object, K extends string = never>(
   };
 }
 
-const OPTIONS = Symbol.for("vibecad.options");
-export type OptionList = Record<string, readonly string[]>;
-type Chosen<C extends OptionList> = { [K in keyof C]: C[K][number] };
+const ORIGIN = Symbol.for("vibecad.origin");
+/** The instance a placement was made from. An instance is its own origin. */
+export function originOf<P extends string>(inst: Instance<P>): Instance<P> {
+  return (inst as any)[ORIGIN] ?? inst;
+}
+/** Places an instance once more: the same part or assembly, in a place of its own. */
+export function place<P extends string>(inst: Instance<P>): Instance<P> {
+  const copy = new Instance<P>({
+    typeName: inst.typeName, params: inst.params, src: callerSrc(),
+    ...(inst.solid && { solid: inst.solid }),
+    ports: inst.ports, children: inst.children, mates: inst.mates, joints: inst.joints, checks: inst.checks,
+    ...(inst.ground && { ground: inst.ground }),
+  });
+  return Object.assign(copy, { [ORIGIN]: originOf(inst) });
+}
 
-/** An entry's default export with choices the app and `--option` can switch. The first value of each is the default. */
-export function options<const C extends OptionList>(choices: C, make: (chosen: Chosen<C>) => Instance<any>) {
-  return Object.assign((chosen: Partial<Chosen<C>> = {}) => make({ ...defaultOptions(choices), ...chosen } as Chosen<C>), { [OPTIONS]: choices });
-}
-/** The choices an entry's default export declares, across copies of this module. */
-export function optionsOf(v: unknown): OptionList | undefined {
-  return typeof v === "function" && OPTIONS in v ? (v as any)[OPTIONS] : undefined;
-}
-export function defaultOptions(choices: OptionList): Record<string, string> {
-  return Object.fromEntries(Object.entries(choices).map(([k, vs]) => [k, vs[0]!]));
-}
-
-/** Defines an assembly type: named child instances joined by mates and joints. */
+/** Defines an assembly factory: named instances joined by mates and joints. Each call makes one assembly. */
 export function assembly<P extends object, K extends string = never>(
   typeName: string,
   build: (params: P) => {

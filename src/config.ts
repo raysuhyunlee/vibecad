@@ -10,18 +10,16 @@ export interface Config {
   port: number;
   agent: string;
   model?: string;
-  keepMb: number; // build output kept for open tabs
 }
 
 const VALID: Record<keyof Config, [(v: unknown) => boolean, string]> = {
   port: [(v) => Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 65535, "a port number"],
   agent: [(v) => typeof v === "string", "a string"],
   model: [(v) => typeof v === "string", "a string"],
-  keepMb: [(v) => typeof v === "number" && v >= 0, "a number, 0 or more"],
 };
 
 export function loadConfig(): Config {
-  const config: Config = { port: 4173, agent: "claude", keepMb: 512 };
+  const config: Config = { port: 4173, agent: "claude" };
   if (!existsSync(CONFIG_FILE)) return config;
   let file: Record<string, unknown>;
   try {

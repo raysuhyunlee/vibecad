@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { BooleanOp, JoinType, OcctKernel, SweepMode, TransitionMode, type EvolutionData, type ShapeHandle } from "occt-wasm";
 import {
-  EdgeSel, Instance, isWorld, Solid,
+  EdgeSel, Instance, isWorld, originOf, Solid, world,
   type CheckDef, type FaceRef, type Helix, type JointDef, type MateDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Spine, type Src, type Vec3,
 } from "./lang.ts";
 
@@ -104,15 +104,14 @@ export interface Model {
   ground?: string;
   checks: CheckResult[];
   hash: string;
-  /** The entry's choices and the value each was built with. */
-  options?: { name: string; values: readonly string[]; value: string }[];
 }
 export interface BuildOutput {
   model: Model;
   meshes: MeshData[];
   /** Placed solids by instance path, for export, render and query. */
   shapes: Map<string, ShapeHandle>;
-  stepMeshes: Map<number, MeshData>;
+  /** Each feature's mesh, by part path and step id. */
+  stepMeshes: Map<string, Map<number, MeshData>>;
 }
 
 interface Tag {
@@ -709,70 +708,103 @@ function isRef(p: PortDef | PortRef): p is PortRef {
   return "owner" in p;
 }
 
-/** Resolves an exposed port down to its part and local frame. */
-function resolvePort(ref: PortRef): { leaf: Instance; def: PortDef } {
-  const p = ref.owner.ports[ref.name]!;
-  return isRef(p) ? resolvePort(p) : { leaf: ref.owner, def: p };
+/** One place of an instance in the tree. An instance can be placed more than once, so links and checks resolve by place. */
+interface Node {
+  path: string;
+  inst: Instance;
+  children: Map<Instance, Node>;
+}
+const WORLD_NODE: Node = { path: "", inst: world.owner, children: new Map() };
+
+function tree(inst: Instance, path: string): Node {
+  const node: Node = { path, inst, children: new Map() };
+  for (const [name, c] of Object.entries(inst.children)) {
+    if (node.children.has(c)) {
+      throw new CadError("PLACED_TWICE", `${c.typeName} is placed twice in ${inst.typeName}`, c.src, "Place it again with place(instance).");
+    }
+    node.children.set(c, tree(c, path ? `${path}/${name}` : name));
+  }
+  return node;
+}
+/** Where `inst` sits within `scope`: the scope itself, one of its children, or else the first match further down. */
+function find(scope: Node, inst: Instance): Node | undefined {
+  if (scope.inst === inst) return scope;
+  const direct = scope.children.get(inst);
+  if (direct) return direct;
+  for (const c of scope.children.values()) {
+    const n = find(c, inst);
+    if (n) return n;
+  }
+  return undefined;
 }
 
-type Pose = ReadonlyMap<JointDef, number>;
+/** Resolves an exposed port down to its part and local frame. */
+function resolvePort(ref: PortRef, scope: Node, src: Src): { leaf: Node; def: PortDef } {
+  if (isWorld(ref.owner)) return { leaf: WORLD_NODE, def: ref.owner.ports[ref.name] as PortDef };
+  const owner = find(scope, ref.owner);
+  if (!owner) throw new CadError("BAD_MATE", `Mate references a part outside ${scope.inst.typeName}`, src);
+  const p = ref.owner.ports[ref.name]!;
+  return isRef(p) ? resolvePort(p, owner, src) : { leaf: owner, def: p };
+}
+
+type Pose = ReadonlyMap<string, number>; // joint path -> value
 const isJoint = (m: MateDef): m is JointDef => "kind" in m;
 const jointValue = (j: JointDef) => (j.kind === "revolute" ? j.angle : j.gap);
+const childPath = (node: Node, name: string) => (node.path ? `${node.path}/${name}` : name);
 
-function collectJoints(inst: Instance, path: string, out: Array<[string, JointDef]>) {
-  for (const [name, j] of Object.entries(inst.joints)) out.push([path ? `${path}/${name}` : name, j]);
-  for (const [name, c] of Object.entries(inst.children)) collectJoints(c, path ? `${path}/${name}` : name, out);
+/** A mate or joint, with the place it was written in. A joint has its path. */
+interface Link {
+  m: MateDef;
+  scope: Node;
+  path?: string;
 }
-function collectLinks(inst: Instance, out: MateDef[]) {
-  const links = [...inst.mates, ...Object.values(inst.joints)];
-  const leaves: Array<[string, Instance]> = [];
-  collectLeaves(inst, "", leaves);
-  const within = new Set(leaves.map(([, leaf]) => leaf));
-  for (const l of links) {
-    if (isWorld(resolvePort(l.a).leaf) || isWorld(resolvePort(l.b).leaf)) {
-      throw new CadError("BAD_MATE", "world can only be mated in an assembly's ground", l.src, "Move this mate to ground: mate(world, port).");
-    }
-    if (!within.has(resolvePort(l.a).leaf) || !within.has(resolvePort(l.b).leaf)) {
-      throw new CadError("BAD_MATE", `Mate references a part outside ${inst.typeName}`, l.src);
+function collectJoints(node: Node, out: Array<[string, JointDef]>) {
+  for (const [name, j] of Object.entries(node.inst.joints)) out.push([childPath(node, name), j]);
+  for (const c of node.children.values()) collectJoints(c, out);
+}
+function collectLinks(node: Node, out: Link[]) {
+  const links: Link[] = [
+    ...node.inst.mates.map((m) => ({ m, scope: node })),
+    ...Object.entries(node.inst.joints).map(([name, m]) => ({ m, scope: node, path: childPath(node, name) })),
+  ];
+  for (const { m } of links) {
+    if (resolvePort(m.a, node, m.src).leaf === WORLD_NODE || resolvePort(m.b, node, m.src).leaf === WORLD_NODE) {
+      throw new CadError("BAD_MATE", "world can only be mated in an assembly's ground", m.src, "Move this mate to ground: mate(world, port).");
     }
   }
   out.push(...links);
-  for (const c of Object.values(inst.children)) collectLinks(c, out);
+  for (const c of node.children.values()) collectLinks(c, out);
 }
 
 /** Places every part as one tree of links, growing outward from the ground, or else the first part. */
-function solve(root: Instance, pose: Pose): { at: Map<Instance, Mat>; joints: JointResult[]; ground?: string } {
-  const leaves: Array<[string, Instance]> = [];
-  collectLeaves(root, "", leaves);
-  const named: Array<[string, JointDef]> = [];
-  collectJoints(root, "", named);
-  const jointPath = new Map(named.map(([path, j]) => [j, path]));
-  const pending: MateDef[] = [];
+function solve(root: Node, leaves: Node[], pose: Pose): { at: Map<Node, Mat>; joints: JointResult[]; ground?: string } {
+  const pending: Link[] = [];
   collectLinks(root, pending);
 
   // The world frame is a part already placed at the origin; without a ground, the first part is.
-  const ground = root.ground;
-  let fixed = leaves[0]![1], grounded: string | undefined;
+  const ground = root.inst.ground;
+  let fixed = leaves[0]!, grounded: string | undefined;
   if (ground) {
-    const ends = [resolvePort(ground.a).leaf, resolvePort(ground.b).leaf];
-    grounded = leaves.find(([, l]) => l === ends.find((e) => !isWorld(e)))?.[0];
-    if (isJoint(ground) || ends.filter(isWorld).length !== 1 || grounded === undefined) {
-      throw new CadError("BAD_MATE", `The ground of ${root.typeName} must be mate(world, port) with a port of its own part`, ground.src);
+    const ends = [resolvePort(ground.a, root, ground.src).leaf, resolvePort(ground.b, root, ground.src).leaf];
+    const own = ends.find((e) => e !== WORLD_NODE);
+    grounded = own && leaves.includes(own) ? own.path : undefined;
+    if (isJoint(ground) || ends.filter((e) => e === WORLD_NODE).length !== 1 || grounded === undefined) {
+      throw new CadError("BAD_MATE", `The ground of ${root.inst.typeName} must be mate(world, port) with a port of its own part`, ground.src);
     }
-    fixed = ends.find(isWorld)!;
-    pending.push(ground);
+    fixed = WORLD_NODE;
+    pending.push({ m: ground, scope: root });
   }
-  const placed = new Map<Instance, Mat>([[fixed, IDENTITY]]);
-  const parent = new Map<Instance, Instance>();
-  const joints: Array<{ result: JointResult; moving: Instance }> = [];
+  const placed = new Map<Node, Mat>([[fixed, IDENTITY]]);
+  const parent = new Map<Node, Node>();
+  const joints: Array<{ result: JointResult; moving: Node }> = [];
 
-  const place = (m: MateDef) => {
-    const a = resolvePort(m.a), b = resolvePort(m.b);
+  const place = ({ m, scope, path }: Link) => {
+    const a = resolvePort(m.a, scope, m.src), b = resolvePort(m.b, scope, m.src);
     const aAt = placed.get(a.leaf), bAt = placed.get(b.leaf);
     if (aAt && bAt) {
       throw new CadError(
         "OVER_CONSTRAINED",
-        `${a.leaf.typeName} and ${b.leaf.typeName} are already placed by other mates or joints`,
+        `${a.leaf.inst.typeName} and ${b.leaf.inst.typeName} are already placed by other mates or joints`,
         m.src,
         "Links must form a tree in this version, so closed loops are not supported. Remove the extra link.",
       );
@@ -782,11 +814,11 @@ function solve(root: Instance, pose: Pose): { at: Map<Instance, Mat>; joints: Jo
 
     let { gap, angle } = m;
     if (isJoint(m)) {
-      const value = pose.get(m) ?? jointValue(m);
+      const value = pose.get(path!) ?? jointValue(m);
       if (value < m.min - 1e-9 || value > m.max + 1e-9) {
         throw new CadError(
           "JOINT_OUT_OF_RANGE",
-          `Joint "${jointPath.get(m)}" is at ${value}, outside ${m.min} to ${m.max}`,
+          `Joint "${path}" is at ${value}, outside ${m.min} to ${m.max}`,
           m.src,
           "Change the value or widen min and max.",
         );
@@ -809,7 +841,7 @@ function solve(root: Instance, pose: Pose): { at: Map<Instance, Mat>; joints: Jo
       joints.push({
         moving: moving.leaf,
         result: {
-          path: jointPath.get(m)!, kind: m.kind, value: m.kind === "revolute" ? angle : gap,
+          path: path!, kind: m.kind, value: m.kind === "revolute" ? angle : gap,
           min: m.min, max: m.max,
           origin: [target[3]!, target[7]!, target[11]!].map(round) as Vec3,
           axis: axisOf(m.kind === "revolute" ? target : world),
@@ -829,46 +861,44 @@ function solve(root: Instance, pose: Pose): { at: Map<Instance, Mat>; joints: Jo
       }
     }
   }
-  for (const [path, leaf] of leaves) {
+  for (const leaf of leaves) {
     if (!placed.has(leaf)) {
       throw new CadError(
         "UNPLACED_PART",
-        `"${path}" (${leaf.typeName}) in ${root.typeName} is not connected to the ${ground ? "ground" : "first part"} by mates or joints`,
-        leaf.src,
+        `"${leaf.path}" (${leaf.inst.typeName}) in ${root.inst.typeName} is not connected to the ${ground ? "ground" : "first part"} by mates or joints`,
+        leaf.inst.src,
       );
     }
   }
   for (const { result, moving } of joints) {
     result.moves = leaves
-      .filter(([, leaf]) => {
-        for (let l: Instance | undefined = leaf; l; l = parent.get(l)) if (l === moving) return true;
+      .filter((leaf) => {
+        for (let l: Node | undefined = leaf; l; l = parent.get(l)) if (l === moving) return true;
         return false;
       })
-      .map(([path]) => path);
+      .map((leaf) => leaf.path);
   }
   return { at: placed, joints: joints.map((j) => j.result), ...(grounded !== undefined && { ground: grounded }) };
 }
 
 // --- Build ------------------------------------------------------------------
 
-function collectLeaves(inst: Instance, path: string, out: Array<[string, Instance]>) {
-  if (inst.solid) out.push([path, inst]);
-  for (const [name, c] of Object.entries(inst.children)) {
-    collectLeaves(c, path ? `${path}/${name}` : name, out);
-  }
+function collectLeaves(node: Node, out: Node[]) {
+  if (node.inst.solid) out.push(node);
+  for (const c of node.children.values()) collectLeaves(c, out);
 }
-function collectChecks(inst: Instance, out: CheckDef[]) {
-  out.push(...inst.checks);
-  for (const c of Object.values(inst.children)) collectChecks(c, out);
+function collectChecks(node: Node, out: Array<{ c: CheckDef; scope: Node }>) {
+  out.push(...node.inst.checks.map((c) => ({ c, scope: node })));
+  for (const c of node.children.values()) collectChecks(c, out);
 }
-function runCheck(c: CheckDef, q: Query, pathOf: (j: JointDef) => string): CheckResult {
+function runCheck(c: CheckDef, q: Query, pathOf: (j: JointDef) => string | undefined): CheckResult {
   if (!c.sweep) return { name: c.name, pass: c.fn(q), src: c.src };
   const { joint, steps } = c.sweep;
   const last = Math.max(steps, 2) - 1;
   for (let i = 0; i <= last; i++) {
     const value = joint.min + ((joint.max - joint.min) * i) / last;
     if (!c.fn(q.at(joint, value))) {
-      return { name: c.name, pass: false, src: c.src, failedAt: { joint: pathOf(joint), value: round(value) } };
+      return { name: c.name, pass: false, src: c.src, failedAt: { joint: pathOf(joint)!, value: round(value) } };
     }
   }
   return { name: c.name, pass: true, src: c.src };
@@ -882,139 +912,214 @@ function toMesh(k: OcctKernel, shape: ShapeHandle, path: string, indexOf: (hash:
   return { path, positions: m.positions, normals: m.normals, indices: m.indices, faceGroups: groups };
 }
 
+const apply = (m: Mat, v: Vec3, w = 1): Vec3 => [
+  m[0]! * v[0] + m[1]! * v[1] + m[2]! * v[2] + m[3]! * w,
+  m[4]! * v[0] + m[5]! * v[1] + m[6]! * v[2] + m[7]! * w,
+  m[8]! * v[0] + m[9]! * v[1] + m[10]! * v[2] + m[11]! * w,
+];
+/** Moves a mesh by a rigid transform. */
+function placeMesh(m: MeshData, mat: Mat, path: string): MeshData {
+  const move = (src: Float32Array, w: number) => {
+    const out = new Float32Array(src.length);
+    for (let i = 0; i < src.length; i += 3) out.set(apply(mat, [src[i]!, src[i + 1]!, src[i + 2]!], w), i);
+    return out;
+  };
+  return { path, positions: move(m.positions, 1), normals: move(m.normals, 0), indices: m.indices, faceGroups: m.faceGroups };
+}
+
+/** A part built in its own frame: all an assembly needs to place it without evaluating it again. */
+export interface PartBuild {
+  /** In the part's own frame, with path "". */
+  part: PartResult;
+  mesh: MeshData;
+  /** Each feature's mesh by step id, or undefined when built without them. */
+  steps?: Map<number, MeshData>;
+  shape: ShapeHandle;
+}
+/** Keeps part builds between runs. `put` gets the part's build as if it were the entry. */
+export interface PartStore {
+  get(inst: Instance, steps: boolean): PartBuild | undefined;
+  put(inst: Instance, part: PartBuild, solo: BuildOutput): void;
+}
+
+function evalPart(ev: Evaluator, inst: Instance, withSteps: boolean): PartBuild {
+  const k = ev.k;
+  const solid = inst.solid!;
+  const e = ev.eval(solid);
+  const seen = new Map<string, number>();
+  const faceIndex = new Map<number, number>();
+  const faces: FaceInfo[] = ev.faces(e.shape).map((f, i) => {
+    const h = ev.hash(f);
+    faceIndex.set(h, i);
+    const t = e.tags.get(h)!;
+    const n = (seen.get(t.name) ?? 0) + 1;
+    seen.set(t.name, n);
+    return {
+      id: n === 1 ? t.name : `${t.name}~${n}`,
+      name: t.name,
+      src: t.src,
+      surface: k.surfaceType(f),
+      area: round(k.getSurfaceArea(f)),
+      center: tuple(k.getSurfaceCenterOfMass(f)).map(round) as Vec3,
+    };
+  });
+
+  const steps: StepInfo[] = [];
+  const stepMeshes = new Map<number, MeshData>();
+  const visit = new Set<Solid>();
+  const walk = (n: Solid) => {
+    if (visit.has(n)) return;
+    visit.add(n);
+    n.inputs.forEach(walk);
+    const r = ev.eval(n);
+    steps.push({
+      id: n.id, op: n.op, name: n.name, src: n.src,
+      inputs: n.inputs.map((i) => i.id),
+      volume: round(k.getVolume(r.shape)),
+      faces: r.tags.size,
+    });
+    if (withSteps) stepMeshes.set(n.id, toMesh(k, r.shape, "", () => -1));
+  };
+  walk(solid);
+
+  return {
+    part: {
+      path: "", type: inst.typeName, params: inst.params, src: inst.src,
+      volume: round(k.getVolume(e.shape)), bbox: bboxOf(k, e.shape), faces, steps,
+    },
+    mesh: toMesh(k, e.shape, "", (h) => faceIndex.get(h) ?? -1),
+    ...(withSteps && { steps: stepMeshes }),
+    shape: e.shape,
+  };
+}
+
+function hashOf(parts: PartResult[], meshes: MeshData[]) {
+  const digest = createHash("sha256");
+  parts.forEach((p, i) => {
+    const mesh = meshes[i]!;
+    digest.update(p.path);
+    digest.update(p.faces.map((f) => f.id).join("\n"));
+    digest.update(new Uint8Array(mesh.positions.buffer, mesh.positions.byteOffset, mesh.positions.byteLength));
+  });
+  return digest.digest("hex").slice(0, 16);
+}
+
 export async function build(
   root: Instance,
-  opts: { stepMeshes?: boolean; pose?: Record<string, number>; sweeps?: boolean } = {},
+  opts: { stepMeshes?: boolean; pose?: Record<string, number>; sweeps?: boolean; store?: PartStore } = {},
 ): Promise<BuildOutput> {
   const k = await getKernel();
   const ev = new Evaluator(k);
-  const leaves: Array<[string, Instance]> = [];
-  collectLeaves(root, "", leaves);
+  const top = tree(root, "");
+  const leaves: Node[] = [];
+  collectLeaves(top, leaves);
   if (leaves.length === 0) throw new CadError("EMPTY_MODEL", `${root.typeName} has no parts`, root.src);
 
   const named: Array<[string, JointDef]> = [];
-  collectJoints(root, "", named);
-  const jointByPath = new Map(named);
-  const pathOfJoint = new Map(named.map(([path, j]) => [j, path]));
-  const pose = new Map<JointDef, number>();
+  collectJoints(top, named);
+  const pose = new Map<string, number>();
   for (const [path, value] of Object.entries(opts.pose ?? {})) {
-    const joint = jointByPath.get(path);
-    if (!joint) {
-      throw new CadError("NO_SUCH_JOINT", `No joint "${path}"`, undefined, `Joints: ${[...jointByPath.keys()].join(", ") || "none"}`);
+    if (!named.some(([p]) => p === path)) {
+      throw new CadError("NO_SUCH_JOINT", `No joint "${path}"`, undefined, `Joints: ${named.map(([p]) => p).join(", ") || "none"}`);
     }
-    pose.set(joint, value);
+    pose.set(path, value);
+  }
+  /** The path of a joint as seen from a check's place. */
+  const jointPathIn = (scope: Node, joint: JointDef) =>
+    named.find(([p, j]) => j === joint && (scope.path === "" || p.startsWith(`${scope.path}/`)))?.[0];
+
+  const query = (scope: Node, at: Pose, shapeOf: (n: Node) => ShapeHandle): Query => {
+    const of = (i: Instance) => {
+      const n = find(scope, i);
+      if (!n?.inst.solid) throw new Error(`${i.typeName} is not a part of this build`);
+      return shapeOf(n);
+    };
+    return {
+      distance: (a, b) => round(k.distanceBetween(of(a), of(b))),
+      volume: (a) => round(k.getVolume(of(a))),
+      overlap: (a, b) => {
+        const r = k.booleanOp(BooleanOp.Common, [of(a)], [of(b)]);
+        return k.getSubShapes(r.result, "solid").length ? round(k.getVolume(r.result)) : 0;
+      },
+      bbox: (a) => bboxOf(k, of(a)),
+      at: (joint, value) => {
+        const path = jointPathIn(scope, joint);
+        if (path === undefined) {
+          throw new CadError("NO_SUCH_JOINT", "A check uses a joint that is not part of this build", joint.src);
+        }
+        const next = new Map(at).set(path, value);
+        const moved = solve(top, leaves, next).at;
+        const cache = new Map<Node, ShapeHandle>();
+        return query(scope, next, (n) => {
+          let s = cache.get(n);
+          if (s === undefined) {
+            s = k.transform(own.get(originOf(n.inst))!.shape, moved.get(n)!);
+            cache.set(n, s);
+          }
+          return s;
+        });
+      },
+    };
+  };
+  const checksOf = (node: Node, shapeOf: (n: Node) => ShapeHandle, at: Pose) => {
+    const defs: Array<{ c: CheckDef; scope: Node }> = [];
+    collectChecks(node, defs);
+    return defs
+      .filter(({ c }) => opts.sweeps || !c.sweep)
+      .map(({ c, scope }) => runCheck(c, query(scope, at, shapeOf), (j) => jointPathIn(scope, j)));
+  };
+
+  // Each instance is built once, however often it is placed, and only when the store has no fresh build of it.
+  const own = new Map<Instance, PartBuild>();
+  const withSteps = !!opts.stepMeshes;
+  for (const leaf of leaves) {
+    const origin = originOf(leaf.inst);
+    if (own.has(origin)) continue;
+    let b = opts.store?.get(origin, withSteps);
+    if (!b) {
+      b = evalPart(ev, origin, withSteps);
+      if (opts.store) {
+        const solo = tree(origin, "");
+        const checks = origin.checks.length ? checksOf(solo, () => b!.shape, new Map()) : [];
+        opts.store.put(origin, b, {
+          model: { type: origin.typeName, parts: [b.part], joints: [], checks, hash: hashOf([b.part], [b.mesh]) },
+          meshes: [b.mesh], shapes: new Map([["", b.shape]]), stepMeshes: new Map(b.steps ? [["", b.steps]] : []),
+        });
+      }
+    }
+    own.set(origin, b);
   }
 
-  const solved = solve(root, pose);
-  const transforms = solved.at;
+  const solved = solve(top, leaves, pose);
   const parts: PartResult[] = [];
   const meshes: MeshData[] = [];
   const shapes = new Map<string, ShapeHandle>();
-  const byInstance = new Map<Instance, ShapeHandle>();
-  const stepMeshes = new Map<number, MeshData>();
-  const digest = createHash("sha256");
-
-  for (const [path, inst] of leaves) {
-    const solid = inst.solid!;
-    const e = ev.eval(solid);
-    const mat = transforms.get(inst) ?? IDENTITY;
-    const hs = [...e.tags.keys()];
-    const placed = k.transformWithHistory(e.shape, mat, hs, HASH_BOUND);
-    const tagged = ev.track(solid, placed.result, placed, [e]);
-
-    const seen = new Map<string, number>();
-    const faceIndex = new Map<number, number>();
-    const faces: FaceInfo[] = ev.faces(tagged.shape).map((f, i) => {
-      const h = ev.hash(f);
-      faceIndex.set(h, i);
-      const t = tagged.tags.get(h)!;
-      const n = (seen.get(t.name) ?? 0) + 1;
-      seen.set(t.name, n);
-      return {
-        id: n === 1 ? t.name : `${t.name}~${n}`,
-        name: t.name,
-        src: t.src,
-        surface: k.surfaceType(f),
-        area: round(k.getSurfaceArea(f)),
-        center: tuple(k.getSurfaceCenterOfMass(f)).map(round) as Vec3,
-      };
-    });
-
-    const steps: StepInfo[] = [];
-    const visit = new Set<Solid>();
-    const walk = (n: Solid) => {
-      if (visit.has(n)) return;
-      visit.add(n);
-      n.inputs.forEach(walk);
-      const r = ev.eval(n);
-      steps.push({
-        id: n.id, op: n.op, name: n.name, src: n.src,
-        inputs: n.inputs.map((i) => i.id),
-        volume: round(k.getVolume(r.shape)),
-        faces: r.tags.size,
-      });
-      if (opts.stepMeshes) {
-        const placedStep = k.transform(r.shape, mat);
-        stepMeshes.set(n.id, toMesh(k, placedStep, path, () => -1));
-      }
-    };
-    walk(solid);
-
-    const mesh = toMesh(k, tagged.shape, path, (h) => faceIndex.get(h) ?? -1);
-    meshes.push(mesh);
-    digest.update(path);
-    digest.update(faces.map((f) => f.id).join("\n"));
-    digest.update(new Uint8Array(mesh.positions.buffer, mesh.positions.byteOffset, mesh.positions.byteLength));
-    shapes.set(path, tagged.shape);
-    byInstance.set(inst, tagged.shape);
+  const placedShapes = new Map<Node, ShapeHandle>();
+  const stepMeshes = new Map<string, Map<number, MeshData>>();
+  for (const leaf of leaves) {
+    const b = own.get(originOf(leaf.inst))!;
+    const mat = solved.at.get(leaf) ?? IDENTITY;
+    const shape = k.transform(b.shape, mat);
+    meshes.push(placeMesh(b.mesh, mat, leaf.path));
+    if (withSteps && b.steps) {
+      stepMeshes.set(leaf.path, new Map([...b.steps].map(([id, m]) => [id, placeMesh(m, mat, leaf.path)])));
+    }
+    shapes.set(leaf.path, shape);
+    placedShapes.set(leaf, shape);
     parts.push({
-      path, type: inst.typeName, params: inst.params, src: inst.src,
-      volume: round(k.getVolume(tagged.shape)),
-      bbox: bboxOf(k, tagged.shape),
-      faces, steps,
+      ...b.part,
+      path: leaf.path, type: leaf.inst.typeName, params: leaf.inst.params, src: leaf.inst.src,
+      bbox: bboxOf(k, shape),
+      faces: b.part.faces.map((f) => ({ ...f, center: apply(mat, f.center).map(round) as Vec3 })),
     });
   }
 
-  const placedShape = (i: Instance) => {
-    const s = byInstance.get(i);
-    if (s === undefined) throw new Error(`${i.typeName} is not a part of this build`);
-    return s;
-  };
-  const query = (at: Pose, shapeOf: (i: Instance) => ShapeHandle): Query => ({
-    distance: (a, b) => round(k.distanceBetween(shapeOf(a), shapeOf(b))),
-    volume: (a) => round(k.getVolume(shapeOf(a))),
-    overlap: (a, b) => {
-      const r = k.booleanOp(BooleanOp.Common, [shapeOf(a)], [shapeOf(b)]);
-      return k.getSubShapes(r.result, "solid").length ? round(k.getVolume(r.result)) : 0;
-    },
-    bbox: (a) => bboxOf(k, shapeOf(a)),
-    at: (joint, value) => {
-      if (!pathOfJoint.has(joint)) {
-        throw new CadError("NO_SUCH_JOINT", "A check uses a joint that is not part of this build", joint.src);
-      }
-      const next = new Map(at).set(joint, value);
-      const moved = solve(root, next).at;
-      const cache = new Map<Instance, ShapeHandle>();
-      return query(next, (i) => {
-        placedShape(i);
-        let s = cache.get(i);
-        if (s === undefined) {
-          s = k.transform(ev.eval(i.solid!).shape, moved.get(i)!);
-          cache.set(i, s);
-        }
-        return s;
-      });
-    },
-  });
-  const q = query(pose, placedShape);
-  const checkDefs: CheckDef[] = [];
-  collectChecks(root, checkDefs);
-  const checks = checkDefs
-    .filter((c) => opts.sweeps || !c.sweep)
-    .map((c) => runCheck(c, q, (j) => pathOfJoint.get(j)!));
-
+  const checks = checksOf(top, (n) => placedShapes.get(n)!, pose);
   return {
-    model: { type: root.typeName, parts, joints: solved.joints, ...(solved.ground !== undefined && { ground: solved.ground }), checks, hash: digest.digest("hex").slice(0, 16) },
+    model: {
+      type: root.typeName, parts, joints: solved.joints, ...(solved.ground !== undefined && { ground: solved.ground }),
+      checks, hash: hashOf(parts, meshes),
+    },
     meshes, shapes, stepMeshes,
   };
 }

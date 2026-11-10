@@ -3,19 +3,35 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { build, CadError, getKernel, type BuildOutput, type Model } from "./eval.ts";
-import { ensureDir } from "./fs.ts";
-import { defaultOptions, isInstance, optionsOf, STEP_FILE, stepEntry, type Instance } from "./lang.ts";
+import { build, CadError, getKernel, type BuildOutput, type MeshData, type Model, type PartBuild, type PartStore } from "./eval.ts";
+import { buildDir, digest, ensureDir, isFresh, toolDigest, type BuildInputs } from "./fs.ts";
+import { isInstance, originOf, STEP_FILE, stepEntry, type Instance, type Solid } from "./lang.ts";
+
+// The project's modules as they load: each file's content digest, and what each imports.
+// vibecad's own source counts once, as the tool digest.
+const OWN = new URL("./", import.meta.url).href;
+const counted = (url: string) => url.startsWith("file:") && !url.startsWith(OWN) && !url.includes("/node_modules/");
+const digests = new Map<string, string>();
+const imports = new Map<string, Set<string>>();
 
 // Projects anywhere on disk import the language as "vibecad".
 registerHooks({
-  resolve: (specifier, context, next) =>
-    specifier === "vibecad"
+  resolve: (specifier, context, next) => {
+    const r = specifier === "vibecad"
       ? { url: new URL("./index.ts", import.meta.url).href, shortCircuit: true }
-      : next(specifier, context),
+      : next(specifier, context);
+    const from = context.parentURL;
+    if (from && counted(from) && counted(r.url)) imports.set(from, (imports.get(from) ?? new Set()).add(r.url));
+    return r;
+  },
+  load: (url, context, next) => {
+    const r = next(url, context);
+    if (counted(url) && r.source != null) digests.set(url, digest(r.source as string | Uint8Array));
+    return r;
+  },
 });
 
 // The kernel prints transfer statistics to stdout. Keep stdout pure JSON.
@@ -28,13 +44,12 @@ process.stdout.write = ((chunk: unknown) => {
 const OUT_DIR = ".vibecad/out";
 const DEV_FILE = ".vibecad/dev.json";
 const USAGE = `vibecad <command> [entry=main.cad.ts]
-An entry is a *.cad.ts or STEP file.
+An entry is a *.cad.ts file, whose default export is its one part or assembly,
+or a STEP file.
 
-Commands that build also take --pose joint=value,other/joint=value
-and --option name=value,other=value for an entry that declares options.
+Commands that build also take --pose joint=value,other/joint=value.
 
-  build [entry] [--steps] [--out-dir dir]
-                                 Build; writes ${OUT_DIR}/model.json and meshes.json
+  build [entry] [--steps]        Build; writes .vibecad/builds/<file>/model.json and meshes.json
   test [entry]                   Build and fail if a design check fails, including joint sweeps
   query [entry] [--part p] [--face id] [--clearance a,b]
                                  Inspect parts and faces or measure between parts
@@ -61,54 +76,142 @@ function describe(e: unknown) {
   return { code: "ERROR", message: e.message, at: at?.trim() };
 }
 
-type Options = NonNullable<Model["options"]>;
+// --- Instances --------------------------------------------------------------
 
-async function load(entry: string, chosen: Record<string, string> = {}): Promise<{ root: Instance; options?: Options }> {
-  const names = Object.keys(chosen);
-  if (STEP_FILE.test(entry)) {
-    if (names.length) throw new CadError("BAD_OPTION", `${entry} has no options`);
-    return { root: stepEntry(entry) };
+/** The `.cad.ts` or STEP file each loaded instance is, relative to the project. One file is one instance. */
+const fileOf = new Map<Instance, string>();
+const rel = (path: string) => relative(process.cwd(), path).split(sep).join("/");
+
+/** A `.cad.ts` module's instance: its default export, and no other. */
+function instanceOf(file: string, mod: Record<string, unknown>) {
+  const d = mod.default;
+  if (!isInstance(d)) {
+    throw new CadError("BAD_ENTRY", `${file} must default-export one part or assembly`, undefined, "For example export default Plate({ ... }). Keep factories in plain .ts files.");
   }
-  const mod = await import(pathToFileURL(resolve(entry)).href);
-  const choices = optionsOf(mod.default);
-  for (const name of names) {
-    const values = choices?.[name];
-    if (!values) {
-      throw new CadError("BAD_OPTION", `${entry} has no option "${name}"`, undefined, `Options: ${Object.keys(choices ?? {}).join(", ") || "none"}`);
-    }
-    if (!values.includes(chosen[name]!)) {
-      throw new CadError("BAD_OPTION", `Option "${name}" cannot be "${chosen[name]}"`, undefined, `Values: ${values.join(", ")}`);
-    }
+  const other = Object.keys(mod).find((n) => n !== "default" && isInstance(mod[n]) && mod[n] !== d);
+  if (other) {
+    throw new CadError("MANY_INSTANCES", `${file} exports a second instance, "${other}"`, undefined, `A .cad.ts file is one instance. Move "${other}" to a .cad.ts file of its own.`);
   }
-  const value = typeof mod.default === "function" ? mod.default(choices && chosen) : mod.default;
-  if (!isInstance(value)) {
-    throw new CadError(
-      "BAD_ENTRY",
-      `${entry} must default-export a part or assembly instance, or a factory with default params`,
-      undefined,
-      "For a part with required params, export a preview: export default () => Part({ ... })",
-    );
-  }
-  if (!choices) return { root: value };
-  const used = { ...defaultOptions(choices), ...chosen };
-  return { root: value, options: Object.entries(choices).map(([name, values]) => ({ name, values, value: used[name]! })) };
+  if (!fileOf.has(d)) fileOf.set(d, file);
+  return d;
 }
 
-/** Builds an entry, keeping its options in the model. */
-async function buildEntry(entry: string, chosen?: Record<string, string>, opts?: Parameters<typeof build>[1]) {
-  const { root, options } = await load(entry, chosen);
-  const out = await build(root, opts);
-  if (options) out.model.options = options;
-  return out;
+/** Every placed instance must be a `.cad.ts` file's own, so each is built once and kept. */
+function checkExported(inst: Instance) {
+  for (const c of Object.values(inst.children)) {
+    if (!fileOf.has(originOf(c))) {
+      throw new CadError(
+        "NOT_EXPORTED",
+        `${c.typeName} in ${inst.typeName} is not the instance of a .cad.ts file`,
+        c.src,
+        "Give it a .cad.ts file whose default export it is, and import that. place(x) places it again.",
+      );
+    }
+    checkExported(c);
+  }
 }
 
+/** Loads an entry: a `.cad.ts` file's instance, or a STEP file as one part. */
+async function load(entry: string): Promise<{ root: Instance; file: string }> {
+  const file = rel(resolve(entry));
+  if (STEP_FILE.test(file)) {
+    const root = stepEntry(file);
+    fileOf.set(root, file);
+    return { root, file };
+  }
+  const url = pathToFileURL(resolve(file)).href;
+  await import(url);
+  for (const u of digests.keys()) if (u.endsWith(".cad.ts")) instanceOf(rel(fileURLToPath(u)), await import(u));
+  const root = instanceOf(file, await import(url));
+  checkExported(root);
+  return { root, file };
+}
+
+/** What an instance's build read: its file and everything that file imports, and any STEP file it loads. */
+function inputsOf(file: string, inst: Instance, steps: boolean): BuildInputs {
+  const files: Record<string, string> = {};
+  const seen = new Set<string>();
+  const visit = (u: string) => {
+    if (seen.has(u)) return;
+    seen.add(u);
+    const d = digests.get(u);
+    if (d) files[rel(fileURLToPath(u))] = d;
+    for (const next of imports.get(u) ?? []) visit(next);
+  };
+  if (!STEP_FILE.test(file)) visit(pathToFileURL(resolve(file)).href);
+  const solids = new Set<Solid>();
+  const walk = (s: Solid) => {
+    if (solids.has(s)) return;
+    solids.add(s);
+    if (s.op === "importStep") {
+      const path = String(s.args.path);
+      if (existsSync(path)) files[rel(path)] = digest(readFileSync(path));
+    }
+    s.inputs.forEach(walk);
+  };
+  const parts = (i: Instance) => {
+    if (i.solid) walk(i.solid);
+    Object.values(i.children).forEach(parts);
+  };
+  parts(inst);
+  return { tool: toolDigest(), steps, files };
+}
+
+/** Keeps each exported part's build in its own folder, so an assembly reuses it and its tab opens at once. */
+function diskStore(k: Awaited<ReturnType<typeof getKernel>>): PartStore {
+  const placeOf = (inst: Instance) => {
+    const file = fileOf.get(inst);
+    return file && !file.startsWith("../") ? file : undefined; // only parts inside the project are kept
+  };
+  return {
+    get(inst, steps) {
+      const file = placeOf(inst);
+      if (!file) return undefined;
+      const dir = buildDir(file);
+      if (!existsSync(`${dir}/shape.brep`) || !isFresh(dir, steps)) return undefined;
+      try {
+        const model: Model = JSON.parse(readFileSync(`${dir}/model.json`, "utf8"));
+        const meshes = JSON.parse(readFileSync(`${dir}/meshes.json`, "utf8"));
+        const own = meshes.steps?.[""] as Record<string, EncodedMesh> | undefined;
+        const b: PartBuild = {
+          part: model.parts[0]!,
+          mesh: decodeMesh(meshes.parts[0]),
+          ...(own && { steps: new Map(Object.entries(own).map(([id, m]) => [Number(id), decodeMesh(m)])) }),
+          shape: k.fromBREPBinary(new Uint8Array(readFileSync(`${dir}/shape.brep`))),
+        };
+        return steps && !b.steps ? undefined : b;
+      } catch {
+        return undefined;
+      }
+    },
+    put(inst, b, solo) {
+      const file = placeOf(inst);
+      if (!file) return;
+      writeOutputs(solo, buildDir(file), inputsOf(file, inst, !!b.steps), k.toBREPBinary(b.shape));
+    },
+  };
+}
+
+// --- Output -----------------------------------------------------------------
+
+type EncodedMesh = ReturnType<typeof encodeMesh>;
 function encode(a: Float32Array | Uint32Array) {
   return Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString("base64");
 }
-function encodeMesh(m: BuildOutput["meshes"][number]) {
+function encodeMesh(m: MeshData) {
   return {
     path: m.path, faceGroups: m.faceGroups,
     positions: encode(m.positions), normals: encode(m.normals), indices: encode(m.indices),
+  };
+}
+function decodeMesh(m: EncodedMesh): MeshData {
+  const bytes = (s: string) => {
+    const b = Buffer.from(s, "base64");
+    return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+  };
+  return {
+    path: m.path, faceGroups: m.faceGroups,
+    positions: new Float32Array(bytes(m.positions)), normals: new Float32Array(bytes(m.normals)), indices: new Uint32Array(bytes(m.indices)),
   };
 }
 
@@ -121,17 +224,21 @@ function summary(m: Model) {
     })),
     joints: m.joints.map((j) => ({ path: j.path, kind: j.kind, value: j.value, min: j.min, max: j.max, src: j.src })),
     checks: m.checks,
-    ...(m.options && { options: m.options }),
   };
 }
 
-async function writeOutputs(out: BuildOutput, dir: string) {
+/** Writes a build, and last what it read, so a half-written build is never taken as fresh. */
+function writeOutputs(out: BuildOutput, dir: string, inputs: BuildInputs, brep?: Uint8Array) {
   ensureDir(dir);
+  rmSync(`${dir}/inputs.json`, { force: true });
   writeFileSync(`${dir}/model.json`, JSON.stringify(out.model, null, 2));
   writeFileSync(`${dir}/meshes.json`, JSON.stringify({
     parts: out.meshes.map(encodeMesh),
-    steps: Object.fromEntries([...out.stepMeshes].map(([id, m]) => [id, encodeMesh(m)])),
+    steps: Object.fromEntries([...out.stepMeshes].map(([path, steps]) =>
+      [path, Object.fromEntries([...steps].map(([id, m]) => [id, encodeMesh(m)]))])),
   }));
+  if (brep) writeFileSync(`${dir}/shape.brep`, brep);
+  writeFileSync(`${dir}/inputs.json`, JSON.stringify(inputs, null, 2));
 }
 
 function parsePose(text: string | undefined) {
@@ -147,16 +254,11 @@ function parsePose(text: string | undefined) {
   return pose;
 }
 
-function parseOptions(text: string | undefined) {
-  const chosen: Record<string, string> = {};
-  for (const item of text ? text.split(",") : []) {
-    const at = item.indexOf("=");
-    if (at <= 0 || item.slice(at + 1).trim() === "") {
-      throw new CadError("BAD_OPTION", `Cannot read "${item}" in --option`, undefined, "Use --option name=value,other=value");
-    }
-    chosen[item.slice(0, at)] = item.slice(at + 1);
-  }
-  return chosen;
+/** Builds an entry, reusing kept part builds when `keep` is set. */
+async function buildEntry(entry: string, opts: Omit<NonNullable<Parameters<typeof build>[1]>, "store"> = {}, keep = true) {
+  const { root, file } = await load(entry);
+  const out = await build(root, { ...opts, ...(keep && { store: diskStore(await getKernel()) }) });
+  return { out, root, file };
 }
 
 function pick(out: BuildOutput, part?: string) {
@@ -179,10 +281,8 @@ async function main() {
       face: { type: "string" },
       clearance: { type: "string" },
       out: { type: "string" },
-      "out-dir": { type: "string" },
       message: { type: "string" },
       pose: { type: "string" },
-      option: { type: "string" },
       labels: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
@@ -200,26 +300,23 @@ async function main() {
     if (rest[0]) throw new CadError("DEV_TAKES_NO_FILE", "dev takes no file", undefined, "Run vibecad dev, then open the project in the app");
     const { loadConfig } = await import("./config.ts");
     const { serve } = await import("./server.ts");
-    const { keepMb, ...config } = loadConfig();
+    const config = loadConfig();
     return serve({
       ...config,
       print,
-      keepBytes: keepMb * 1024 * 1024,
     });
   }
   if (cmd === "show") return show(o.part, o.face, o.message);
 
-  const out = await buildEntry(entry, parseOptions(o.option), {
-    stepMeshes: !!o.steps,
-    pose: parsePose(o.pose),
-    sweeps: cmd === "test",
-  });
+  const pose = parsePose(o.pose);
+  const { out, root, file } = await buildEntry(entry, { stepMeshes: !!o.steps, pose, sweeps: cmd === "test" });
   const k = await getKernel();
 
   switch (cmd) {
     case "build": {
-      const dir = o["out-dir"] ?? OUT_DIR;
-      await writeOutputs(out, dir);
+      // A posed build is not the instance as its source states it, so it is not kept.
+      const dir = Object.keys(pose).length ? OUT_DIR : buildDir(file);
+      writeOutputs(out, dir, inputsOf(file, root, !!o.steps));
       print({ ok: true, ...summary(out.model), artifacts: `${dir}/model.json` });
       return;
     }
@@ -296,9 +393,9 @@ async function diff(ref: string | undefined, entry: string) {
   ensureDir(".vibecad/tmp");
   execFileSync("git", ["worktree", "add", "--detach", "-q", tmp, ref], { stdio: "pipe" });
   try {
-    const before = await buildEntry(`${tmp}/${entry}`);
+    const before = await buildEntry(`${tmp}/${entry}`, {}, false);
     const after = await buildEntry(entry);
-    print({ ok: true, ref, ...compare(before.model, after.model) });
+    print({ ok: true, ref, ...compare(before.out.model, after.out.model) });
   } finally {
     execFileSync("git", ["worktree", "remove", "--force", tmp], { stdio: "pipe" });
     rmSync(tmp, { recursive: true, force: true });
