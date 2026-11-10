@@ -109,6 +109,8 @@
 - other `.ts` files are plain code: not listed, but saving one rebuilds
 - the left panel has a slider per joint; moving one changes the view without a rebuild, using the joint data in `model.json`, and never writes the source
 - the viewer's pose stays with its tab through rebuilds; a message carries the joints moved away from the source
+- a tab's first build fits the camera to the model; a rebuild keeps the camera unless the model's bounds change, then fits again keeping the view direction
+- drag orbits; right drag or shift-drag pans; on a trackpad two-finger scroll pans and pinch zooms, and a mouse wheel zooms
 - a view cube in the corner turns with the camera and shows the world axes; side labels read upright with +Z up, top and bottom with +Y up, and the camera matches; clicking a face, named like `render`'s views, an edge or a corner turns the camera to look from that side, keeping target and distance
 - the agent session survives a file switch, and each message names the file being viewed
 - opening another project is refused while the agent runs

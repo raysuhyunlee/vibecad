@@ -116,8 +116,12 @@ async function loadModel() {
   }
   applyPose();
 
-  if (!views.has(file) && !keptByTab.get(file)?.camera) fit();
-  views.set(file, { world, model, parts, stepMeshes, version: data.version });
+  // A tab's first build fits; a rebuild keeps the camera unless the model's
+  // bounds moved, so the view stays centered as an assembly grows.
+  const box = modelBox();
+  const before = views.get(file)?.box;
+  if (before ? !sameBox(before, box) : !keptByTab.get(file)?.camera) fit();
+  views.set(file, { world, model, parts, stepMeshes, version: data.version, box });
   // Refs stay on the model through rebuilds when their face still exists.
   for (const r of [...refs]) {
     if (!r.part) continue;
@@ -229,9 +233,19 @@ function dropOverlay(o) {
   o.geometry.dispose();
 }
 
-function fit() {
+function modelBox() {
   const box = new THREE.Box3();
   for (const p of parts.values()) box.expandByObject(p.mesh);
+  return box;
+}
+/** True when two boxes match within 1% of their size. */
+function sameBox(a, b) {
+  if (a.isEmpty() || b.isEmpty()) return a.isEmpty() === b.isEmpty();
+  const tol = 0.01 * a.getSize(new THREE.Vector3()).length();
+  return a.min.distanceTo(b.min) <= tol && a.max.distanceTo(b.max) <= tol;
+}
+function fit() {
+  const box = modelBox();
   if (box.isEmpty()) return;
   const center = box.getCenter(new THREE.Vector3());
   const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
@@ -532,6 +546,17 @@ canvas.addEventListener("pointermove", (e) => {
   else hover(null);
 });
 canvas.addEventListener("pointerleave", () => hover(null));
+// Trackpad: two-finger scroll pans and pinch zooms; a mouse wheel zooms.
+// Chrome and Safari report a trackpad's wheelDeltaY as -3x its deltaY.
+stage.addEventListener("wheel", (e) => {
+  if (!controls.enabled || e.ctrlKey || e.target !== canvas) return;
+  const trackpad = e.wheelDeltaY ? e.wheelDeltaY === -3 * e.deltaY : e.deltaMode === 0 && e.deltaX !== 0;
+  if (!trackpad) return;
+  e.preventDefault();
+  e.stopPropagation();
+  gizmo.turn = null;
+  controls._pan(-e.deltaX, -e.deltaY);
+}, { capture: true, passive: false });
 canvas.addEventListener("pointerup", (e) => {
   if (stroke) return finishStroke();
   if (!down) return;
