@@ -245,6 +245,167 @@ function fit() {
   controls.target.copy(center);
 }
 
+// --- View gizmo -------------------------------------------------------------
+// A cube named like `render`'s views, and the world axes. Clicking a face, an
+// edge or a corner turns the camera to look from that side, keeping target and
+// distance.
+const GIZMO_PX = 112;
+const TURN_MS = 250;
+const CUBE = 1.2; // cube size, in gizmo units
+const RIM = 0.22; // width of the edge and corner regions
+const gizmo = {
+  el: $("gizmo"),
+  scene: new THREE.Scene(),
+  camera: new THREE.OrthographicCamera(-1.3, 1.3, 1.3, -1.3, 0.1, 10),
+  regions: [], // faces, edges and corners, each with userData.dir
+  tags: [], // axis labels, each with userData.dir
+  hovered: null,
+  turn: null, // { q, from, dist, t0 }
+};
+gizmo.renderer = new THREE.WebGLRenderer({ canvas: gizmo.el, antialias: true, alpha: true });
+gizmo.renderer.setPixelRatio(devicePixelRatio);
+gizmo.renderer.setSize(GIZMO_PX, GIZMO_PX, false);
+gizmo.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 2.4));
+{
+  const label = (text, color, size) => {
+    const c = document.createElement("canvas");
+    c.width = c.height = 256;
+    const ctx = c.getContext("2d");
+    ctx.font = `600 ${size}px system-ui, sans-serif`;
+    ctx.fillStyle = color;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, 128, 132);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 4;
+    return t;
+  };
+  // A region per direction in {-1, 0, 1}^3: 6 faces, 12 edges, 8 corners.
+  const inner = CUBE - 2 * RIM;
+  for (const x of [-1, 0, 1]) for (const y of [-1, 0, 1]) for (const z of [-1, 0, 1]) {
+    const d = [x, y, z];
+    if (!x && !y && !z) continue;
+    const region = new THREE.Mesh(
+      new THREE.BoxGeometry(...d.map((v) => (v ? RIM : inner))),
+      new THREE.MeshLambertMaterial({ color: 0xf4f5f7 }),
+    );
+    region.position.set(...d.map((v) => (v * (CUBE - RIM)) / 2));
+    region.userData.dir = new THREE.Vector3(...d).normalize();
+    gizmo.scene.add(region);
+    gizmo.regions.push(region);
+  }
+  gizmo.scene.add(new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(CUBE, CUBE, CUBE)),
+    new THREE.LineBasicMaterial({ color: 0x8a8f99 }),
+  ));
+  // Side labels read upright with +Z up; top and bottom with +Y (back) up.
+  const faces = [
+    ["FRONT", [0, -1, 0], [0, 0, 1]], ["BACK", [0, 1, 0], [0, 0, 1]],
+    ["RIGHT", [1, 0, 0], [0, 0, 1]], ["LEFT", [-1, 0, 0], [0, 0, 1]],
+    ["TOP", [0, 0, 1], [0, 1, 0]], ["BOTTOM", [0, 0, -1], [0, 1, 0]],
+  ];
+  // One font size for every face: the longest name spans the cube.
+  const measure = document.createElement("canvas").getContext("2d");
+  measure.font = "600 100px system-ui, sans-serif";
+  const longest = Math.max(...faces.map(([name]) => measure.measureText(name).width));
+  const faceFont = Math.floor((100 * 244) / longest);
+  for (const [name, n, u] of faces) {
+    const normal = new THREE.Vector3(...n), up = new THREE.Vector3(...u);
+    const tag = new THREE.Mesh(
+      new THREE.PlaneGeometry(CUBE, CUBE),
+      new THREE.MeshBasicMaterial({ map: label(name, "#3a3d44", faceFont), transparent: true, depthWrite: false }),
+    );
+    tag.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(up.clone().cross(normal), up, normal));
+    tag.position.copy(normal).multiplyScalar(CUBE / 2 + 0.001);
+    tag.raycast = () => {}; // clicks reach the face under it
+    gizmo.scene.add(tag);
+  }
+  for (const [name, d, color] of [["X", [1, 0, 0], "#e03131"], ["Y", [0, 1, 0], "#2f9e44"], ["Z", [0, 0, 1], "#1c7ed6"]]) {
+    const dir = new THREE.Vector3(...d);
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), dir.clone().multiplyScalar(0.92)]),
+      new THREE.LineBasicMaterial({ color }),
+    );
+    const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: label(name, color, 144), depthTest: false, transparent: true }));
+    tag.position.copy(dir).multiplyScalar(1.06);
+    tag.scale.setScalar(0.38);
+    tag.userData.dir = dir;
+    gizmo.scene.add(line, tag);
+    gizmo.tags.push(tag);
+  }
+}
+
+/** The cube region under a gizmo pointer event, or null. */
+function gizmoHit(e) {
+  const r = gizmo.el.getBoundingClientRect();
+  const p = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(p, gizmo.camera);
+  return raycaster.intersectObjects(gizmo.regions, false)[0]?.object ?? null;
+}
+
+function setGizmoHover(region) {
+  if (region === gizmo.hovered) return;
+  gizmo.hovered?.material.color.set(0xf4f5f7);
+  region?.material.color.copy(accent).lerp(new THREE.Color(0xffffff), 0.45);
+  gizmo.hovered = region;
+  gizmo.el.style.cursor = region ? "pointer" : "";
+}
+
+/** Turns the camera around its target to look from `dir`. */
+// The camera's orientation is slerped in one rotation; orbit controls would
+// re-aim it with +Z up each frame and roll it late near the poles.
+function viewFrom(dir) {
+  // Settle leftover orbit damping now, so it does not add to the turn.
+  controls.enableDamping = false;
+  controls.update();
+  controls.enableDamping = true;
+  const dist = camera.position.distanceTo(controls.target) || 1;
+  const to = dir.clone().normalize();
+  // Top and bottom keep +Y (back) up, like their labels.
+  if (Math.abs(to.z) > 0.999) to.set(0, -1e-4 * Math.sign(to.z), Math.sign(to.z)).normalize();
+  // The orientation orbit controls will hold there, so the hand-over does not jump.
+  const end = new THREE.Matrix4().lookAt(to, new THREE.Vector3(), camera.up);
+  gizmo.turn = {
+    from: camera.quaternion.clone(),
+    to: new THREE.Quaternion().setFromRotationMatrix(end),
+    dist,
+    t0: performance.now(),
+  };
+}
+
+/** Advances a gizmo turn; true while it owns the camera. */
+function stepTurn(now) {
+  const t = gizmo.turn;
+  if (!t) return false;
+  const k = Math.min(1, (now - t.t0) / TURN_MS);
+  const ease = 1 - (1 - k) ** 3;
+  camera.quaternion.slerpQuaternions(t.from, t.to, ease);
+  // The camera looks down its -Z, so it sits on its +Z from the target.
+  camera.position.set(0, 0, t.dist).applyQuaternion(camera.quaternion).add(controls.target);
+  if (k === 1) gizmo.turn = null;
+  return true;
+}
+
+gizmo.el.addEventListener("pointermove", (e) => setGizmoHover(gizmoHit(e)));
+gizmo.el.addEventListener("pointerleave", () => setGizmoHover(null));
+gizmo.el.addEventListener("click", (e) => {
+  const region = gizmoHit(e);
+  if (region) viewFrom(region.userData.dir);
+});
+controls.addEventListener("start", () => (gizmo.turn = null));
+
+function renderGizmo() {
+  const view = camera.position.clone().sub(controls.target).normalize();
+  gizmo.camera.position.copy(view).multiplyScalar(4);
+  gizmo.camera.quaternion.copy(camera.quaternion);
+  // An axis pointing at the viewer would sit on the face label, so it fades out.
+  for (const o of gizmo.tags) {
+    o.material.opacity = THREE.MathUtils.clamp((0.95 - Math.abs(o.userData.dir.dot(view))) / 0.15, 0, 1);
+  }
+  gizmo.renderer.render(gizmo.scene, gizmo.camera);
+}
+
 function resize() {
   const { clientWidth: w, clientHeight: h } = stage;
   renderer.setSize(w, h, false);
@@ -425,7 +586,7 @@ function drawInk(ctx, scale) {
 }
 function frame(now) {
   requestAnimationFrame(frame);
-  controls.update();
+  if (!stepTurn(now)) controls.update();
   sun.position.copy(camera.position);
   if (flashOverlays.length) {
     const left = flashUntil - now;
@@ -436,6 +597,7 @@ function frame(now) {
     }
   }
   renderer.render(scene, camera);
+  renderGizmo();
   const ctx = ink.getContext("2d");
   ctx.clearRect(0, 0, ink.width, ink.height);
   drawInk(ctx, devicePixelRatio);

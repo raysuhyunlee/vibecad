@@ -195,6 +195,7 @@ button { font: inherit; color: inherit; }
   pointer-events: none;
 }
 #empty button { pointer-events: auto; }
+#gizmo { position: absolute; top: var(--s3); right: var(--s3); width: 112px; height: 112px; }
 #tools {
   position: absolute;
   bottom: var(--s3);
