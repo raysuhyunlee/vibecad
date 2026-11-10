@@ -790,6 +790,9 @@ function renderDesign() {
       setPreview(null);
       renderDesign();
     });
+    if (model.ground === p.path) {
+      b.firstChild.insertAdjacentHTML("afterend", '<svg class="ground" role="img" aria-label="Ground"><title>Ground</title><use href="#i-pin"/></svg>');
+    }
     b.onpointerenter = () => setHoveredPart(p.path);
     b.onpointerleave = () => setHoveredPart(null);
     return b;

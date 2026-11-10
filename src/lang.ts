@@ -748,6 +748,7 @@ export class Instance<P extends string = string> {
   readonly mates: MateDef[];
   readonly joints: Record<string, JointDef>;
   readonly checks: CheckDef[];
+  readonly ground?: MateDef;
 
   constructor(init: {
     typeName: string;
@@ -759,8 +760,10 @@ export class Instance<P extends string = string> {
     mates?: MateDef[];
     joints?: Record<string, JointDef>;
     checks?: CheckDef[];
+    ground?: MateDef;
   }) {
     this.typeName = init.typeName;
+    if (init.ground) this.ground = init.ground;
     this.params = init.params;
     this.src = init.src;
     if (init.solid) this.solid = init.solid;
@@ -780,6 +783,17 @@ export class Instance<P extends string = string> {
     return { owner: this, name };
   }
 }
+
+const WORLD = Symbol.for("vibecad.world");
+/** True for the world frame's owner, across copies of this module. */
+export function isWorld(inst: Instance): boolean {
+  return WORLD in inst;
+}
+/** The world frame as a port: the origin, +z up, x along +X. Use it only in an assembly's `ground`. */
+export const world: PortRef = {
+  owner: Object.assign(new Instance({ typeName: "world", params: {}, src: { file: "vibecad", line: 0, col: 0 }, ports: { origin: port([0, 0, 0], [0, 0, 1], [1, 0, 0]) } }), { [WORLD]: true }),
+  name: "origin",
+};
 
 type Args<P> = {} extends P ? [params?: P] : [params: P];
 
@@ -817,6 +831,8 @@ export function assembly<P extends object, K extends string = never>(
     joints?: Record<string, JointDef>;
     ports?: Record<K, PortRef>;
     checks?: CheckDef[];
+    /** `mate(world, port)`: fixes that part to the world frame, used only when this assembly is the entry. */
+    ground?: MateDef;
   },
 ) {
   return (...args: Args<P>): Instance<K> => {
@@ -826,6 +842,7 @@ export function assembly<P extends object, K extends string = never>(
     return new Instance<K>({
       typeName, params, src,
       children: r.parts,
+      ...(r.ground && { ground: r.ground }),
       ...(r.mates && { mates: r.mates }),
       ...(r.joints && { joints: r.joints }),
       ...(r.ports && { ports: r.ports }),

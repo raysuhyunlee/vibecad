@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { BooleanOp, JoinType, OcctKernel, SweepMode, TransitionMode, type EvolutionData, type ShapeHandle } from "occt-wasm";
 import {
-  EdgeSel, Instance, Solid,
+  EdgeSel, Instance, isWorld, Solid,
   type CheckDef, type FaceRef, type Helix, type JointDef, type MateDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Spine, type Src, type Vec3,
 } from "./lang.ts";
 
@@ -100,6 +100,8 @@ export interface Model {
   parts: PartResult[];
   /** Ordered from the fixed part outward, so a joint comes after those that carry it. */
   joints: JointResult[];
+  /** Path of the part fixed to the world by the entry's ground. */
+  ground?: string;
   checks: CheckResult[];
   hash: string;
 }
@@ -725,6 +727,9 @@ function collectLinks(inst: Instance, out: MateDef[]) {
   collectLeaves(inst, "", leaves);
   const within = new Set(leaves.map(([, leaf]) => leaf));
   for (const l of links) {
+    if (isWorld(resolvePort(l.a).leaf) || isWorld(resolvePort(l.b).leaf)) {
+      throw new CadError("BAD_MATE", "world can only be mated in an assembly's ground", l.src, "Move this mate to ground: mate(world, port).");
+    }
     if (!within.has(resolvePort(l.a).leaf) || !within.has(resolvePort(l.b).leaf)) {
       throw new CadError("BAD_MATE", `Mate references a part outside ${inst.typeName}`, l.src);
     }
@@ -733,8 +738,8 @@ function collectLinks(inst: Instance, out: MateDef[]) {
   for (const c of Object.values(inst.children)) collectLinks(c, out);
 }
 
-/** Places every part as one tree of links, growing outward from the first part. */
-function solve(root: Instance, pose: Pose): { at: Map<Instance, Mat>; joints: JointResult[] } {
+/** Places every part as one tree of links, growing outward from the ground, or else the first part. */
+function solve(root: Instance, pose: Pose): { at: Map<Instance, Mat>; joints: JointResult[]; ground?: string } {
   const leaves: Array<[string, Instance]> = [];
   collectLeaves(root, "", leaves);
   const named: Array<[string, JointDef]> = [];
@@ -743,7 +748,19 @@ function solve(root: Instance, pose: Pose): { at: Map<Instance, Mat>; joints: Jo
   const pending: MateDef[] = [];
   collectLinks(root, pending);
 
-  const placed = new Map<Instance, Mat>([[leaves[0]![1], IDENTITY]]);
+  // The world frame is a part already placed at the origin; without a ground, the first part is.
+  const ground = root.ground;
+  let fixed = leaves[0]![1], grounded: string | undefined;
+  if (ground) {
+    const ends = [resolvePort(ground.a).leaf, resolvePort(ground.b).leaf];
+    grounded = leaves.find(([, l]) => l === ends.find((e) => !isWorld(e)))?.[0];
+    if (isJoint(ground) || ends.filter(isWorld).length !== 1 || grounded === undefined) {
+      throw new CadError("BAD_MATE", `The ground of ${root.typeName} must be mate(world, port) with a port of its own part`, ground.src);
+    }
+    fixed = ends.find(isWorld)!;
+    pending.push(ground);
+  }
+  const placed = new Map<Instance, Mat>([[fixed, IDENTITY]]);
   const parent = new Map<Instance, Instance>();
   const joints: Array<{ result: JointResult; moving: Instance }> = [];
 
@@ -814,7 +831,7 @@ function solve(root: Instance, pose: Pose): { at: Map<Instance, Mat>; joints: Jo
     if (!placed.has(leaf)) {
       throw new CadError(
         "UNPLACED_PART",
-        `"${path}" (${leaf.typeName}) in ${root.typeName} is not connected to the first part by mates or joints`,
+        `"${path}" (${leaf.typeName}) in ${root.typeName} is not connected to the ${ground ? "ground" : "first part"} by mates or joints`,
         leaf.src,
       );
     }
@@ -827,7 +844,7 @@ function solve(root: Instance, pose: Pose): { at: Map<Instance, Mat>; joints: Jo
       })
       .map(([path]) => path);
   }
-  return { at: placed, joints: joints.map((j) => j.result) };
+  return { at: placed, joints: joints.map((j) => j.result), ...(grounded !== undefined && { ground: grounded }) };
 }
 
 // --- Build ------------------------------------------------------------------
@@ -995,7 +1012,7 @@ export async function build(
     .map((c) => runCheck(c, q, (j) => pathOfJoint.get(j)!));
 
   return {
-    model: { type: root.typeName, parts, joints: solved.joints, checks, hash: digest.digest("hex").slice(0, 16) },
+    model: { type: root.typeName, parts, joints: solved.joints, ...(solved.ground !== undefined && { ground: solved.ground }), checks, hash: digest.digest("hex").slice(0, 16) },
     meshes, shapes, stepMeshes,
   };
 }

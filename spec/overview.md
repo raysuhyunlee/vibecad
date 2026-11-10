@@ -60,7 +60,8 @@
 - `outerTangent(c1, r1, c2, r2, side)` gives the touch points of a line tangent to two circles
 - features: `union cut intersect fillet chamfer shell translate rotate mirror`
 - structure: `part assembly port mate revolute slider named`
-- links: mates and joints join parts into one tree, growing from the first part; a closed loop is `OVER_CONSTRAINED`
+- links: mates and joints join parts into one tree, growing from the ground, or else the first part; a closed loop is `OVER_CONSTRAINED`
+- ground: an assembly's `ground: mate(world, port)` fixes that part facing the world frame (origin, +z up, x along +X), with `gap` and `angle` as in a mate; only the entry's ground counts, and `world` anywhere else is `BAD_MATE`
 - joints: `revolute(a, b, { angle, min, max, gap })`, default range -180 to 180; `slider(a, b, { min, max, travel, angle })`; both are named in an assembly's `joints`
 - a joint's value lives in the source; `--pose` and the viewer only override it. Its path is `sub/name`, and a value outside its range is an error
 - a positive angle turns the moving part about its own port's +z; a positive travel separates the ports along the fixed port's +z
@@ -126,6 +127,7 @@
 - the agent edits the source, the preview rebuilds on save, changed faces glow
 - the agent points back with `vibecad show`
 - selecting a part in the parts list tints it in the view; hovering its row tints it lighter
+- the parts list marks the grounded part with a pin icon
 - a feature-history list replays any part step by step, next to its source
 
 ## agent sessions
@@ -167,3 +169,4 @@
 - 2026-11-09: add sketch planes, sketch offset and splines; add face labels to `render`
 - 2026-11-09: add `onFace`, `sweep` and `loft`; build refused fillets on convex edges and curved walls
 - 2026-11-10: tint the selected and hovered part from the parts list
+- 2026-11-10: ground an assembly on the world frame

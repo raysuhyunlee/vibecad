@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   assembly, box, check, circle, closedSpline, cylinder, edges, extrude, helix, importStep, loft, mate, minClearance, noCollision, offset, onFace, outerTangent, part, path,
-  plane, polygon, port, rect, revolute, revolve, roundedRect, slider, spine, sweep,
+  plane, polygon, port, rect, revolute, revolve, roundedRect, slider, spine, sweep, world,
 } from "../src/index.ts";
 import { build, CadError, getKernel } from "../src/eval.ts";
 import type { Vec3 } from "../src/lang.ts";
@@ -631,6 +631,24 @@ test("a slider moves along the fixed port, and out-of-range values are errors", 
   assert.equal((await z(30)) - (await z(5)), 25);
   await assert.rejects(build(rail(), { pose: { lift: 51 } }), (e: CadError) => e.code === "JOINT_OUT_OF_RANGE");
   await assert.rejects(build(rail(), { pose: { nope: 1 } }), (e: CadError) => e.code === "NO_SUCH_JOINT" && /lift/.test(e.hint!));
+});
+
+test("ground fixes a part facing the world frame, and joints move the parts away from it", async () => {
+  const hung = assembly("Hung", () => {
+    const a = bar(), b = bar();
+    return { parts: { a, b }, ground: mate(world, b.port("tip")), joints: { j: revolute(a.port("tip"), b.port("hub")) } };
+  });
+  const { model } = await build(hung());
+  const b = model.parts.find((p) => p.path === "b")!.bbox;
+  assert.deepEqual([b.min, b.max].map((v) => v.map((n) => Math.round(n))), [[-20, -1, 0], [0, 1, 2]]);
+  assert.deepEqual(model.joints[0]!.moves, ["a"]);
+  assert.equal(model.ground, "b");
+
+  const misplaced = assembly("Misplaced", () => {
+    const a = bar(), b = bar();
+    return { parts: { a, b }, mates: [mate(world, a.port("tip")), mate(a.port("tip"), b.port("hub"))] };
+  });
+  await assert.rejects(build(misplaced()), (e: CadError) => e.code === "BAD_MATE");
 });
 
 test("a closed loop of joints is refused", async () => {
