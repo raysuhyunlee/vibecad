@@ -30,6 +30,11 @@ const partMaterial = new THREE.MeshStandardMaterial({
   color: 0xb4b8bf, metalness: 0.05, roughness: 0.65,
   polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
 });
+// A selected part takes the accent; a part row under the pointer, a lighter one.
+const selectedMaterial = partMaterial.clone();
+selectedMaterial.color.lerp(accent, 0.55);
+const hoverPartMaterial = partMaterial.clone();
+hoverPartMaterial.color.lerp(accent, 0.3);
 const ghostMaterial = new THREE.MeshStandardMaterial({ color: 0xb4b8bf, transparent: true, opacity: 0.12, depthWrite: false });
 const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x24262b });
 const hoverMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
@@ -42,6 +47,7 @@ let parts = new Map(); // path -> { info, mesh, edges, groups, geometry, matrix 
 let pose = {}; // joint path -> value the person set; kept by tab, never written to the source
 let stepMeshes = {};
 let selectedPart = null;
+let hoveredPart = null; // part row under the pointer
 let previewStep = null;
 let previewObject = null;
 let previous = null; // last model, to flash what changed
@@ -115,6 +121,8 @@ async function loadModel() {
     parts.set(m.path, part);
   }
   applyPose();
+  if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
+  paintParts();
 
   // A tab's first build fits; a rebuild keeps the camera unless the model's
   // bounds moved, so the view stays centered as an assembly grows.
@@ -139,10 +147,11 @@ async function loadModel() {
 function showView(file) {
   loadToken++;
   cancelListening();
+  selectedPart = hoveredPart = null;
   setPreview(null);
   dropOverlay(hoverOverlay);
   flashOverlays.forEach(dropOverlay);
-  hoverOverlay = previous = selectedPart = null;
+  hoverOverlay = previous = null;
   flashOverlays = [];
   hoverKey = "";
   $("tip").hidden = true;
@@ -170,6 +179,7 @@ function showView(file) {
   parts = view?.parts ?? new Map();
   stepMeshes = view?.stepMeshes ?? {};
   applyPose();
+  paintParts();
   if (kept?.camera) {
     camera.position.copy(kept.camera.position);
     controls.target.copy(kept.camera.target);
@@ -774,13 +784,16 @@ function renderDesign() {
     return;
   }
   if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
-  $("parts").replaceChildren(...model.parts.map((p) =>
-    row(p.path || p.type, p.type, selectedPart === p.path, () => {
+  $("parts").replaceChildren(...model.parts.map((p) => {
+    const b = row(p.path || p.type, p.type, selectedPart === p.path, () => {
       selectedPart = selectedPart === p.path ? null : p.path;
       setPreview(null);
       renderDesign();
-    }),
-  ));
+    });
+    b.onpointerenter = () => setHoveredPart(p.path);
+    b.onpointerleave = () => setHoveredPart(null);
+    return b;
+  }));
   $("joints").hidden = model.joints.length === 0;
   $("joints").replaceChildren(...model.joints.map(jointRow));
   const part = selectedPart !== null ? parts.get(selectedPart) : null;
@@ -831,16 +844,7 @@ function setPreview(id) {
     disposeTree(previewObject);
     previewObject = null;
   }
-  for (const [path, p] of parts) {
-    const on = id === null;
-    p.mesh.visible = on;
-    p.edges.visible = on;
-    p.mesh.material = partMaterial;
-    if (!on && path !== selectedPart) {
-      p.mesh.visible = true;
-      p.mesh.material = ghostMaterial;
-    }
-  }
+  paintParts();
   if (id === null) return;
   const data = stepMeshes[id];
   if (!data) return;
@@ -849,6 +853,22 @@ function setPreview(id) {
   previewObject.add(new THREE.Mesh(g, partMaterial), new THREE.LineSegments(new THREE.EdgesGeometry(g, 28), edgeMaterial));
   bindPose(previewObject, parts.get(selectedPart).matrix);
   world.add(previewObject);
+}
+function setHoveredPart(path) {
+  hoveredPart = path;
+  paintParts();
+}
+/** Colors each part: ghosted around a step preview, else by selection and row hover. */
+function paintParts() {
+  const previewing = previewStep !== null;
+  for (const [path, p] of parts) {
+    p.edges.visible = !previewing;
+    p.mesh.visible = !previewing || path !== selectedPart;
+    p.mesh.material = previewing ? ghostMaterial
+      : path === selectedPart ? selectedMaterial
+      : path === hoveredPart ? hoverPartMaterial
+      : partMaterial;
+  }
 }
 async function showSource(src) {
   const box = $("source");

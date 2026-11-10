@@ -125,6 +125,7 @@
 - sending carries text, face ids, source lines, 3D points and a screenshot
 - the agent edits the source, the preview rebuilds on save, changed faces glow
 - the agent points back with `vibecad show`
+- selecting a part in the parts list tints it in the view; hovering its row tints it lighter
 - a feature-history list replays any part step by step, next to its source
 
 ## agent sessions
@@ -165,3 +166,4 @@
 - 2026-11-09: builds stop with the app and fail when their working directory is gone
 - 2026-11-09: add sketch planes, sketch offset and splines; add face labels to `render`
 - 2026-11-09: add `onFace`, `sweep` and `loft`; build refused fillets on convex edges and curved walls
+- 2026-11-10: tint the selected and hovered part from the parts list
