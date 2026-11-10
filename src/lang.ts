@@ -822,6 +822,22 @@ export function part<P extends object, K extends string = never>(
   };
 }
 
+const OPTIONS = Symbol.for("vibecad.options");
+export type OptionList = Record<string, readonly string[]>;
+type Chosen<C extends OptionList> = { [K in keyof C]: C[K][number] };
+
+/** An entry's default export with choices the app and `--option` can switch. The first value of each is the default. */
+export function options<const C extends OptionList>(choices: C, make: (chosen: Chosen<C>) => Instance<any>) {
+  return Object.assign((chosen: Partial<Chosen<C>> = {}) => make({ ...defaultOptions(choices), ...chosen } as Chosen<C>), { [OPTIONS]: choices });
+}
+/** The choices an entry's default export declares, across copies of this module. */
+export function optionsOf(v: unknown): OptionList | undefined {
+  return typeof v === "function" && OPTIONS in v ? (v as any)[OPTIONS] : undefined;
+}
+export function defaultOptions(choices: OptionList): Record<string, string> {
+  return Object.fromEntries(Object.entries(choices).map(([k, vs]) => [k, vs[0]!]));
+}
+
 /** Defines an assembly type: named child instances joined by mates and joints. */
 export function assembly<P extends object, K extends string = never>(
   typeName: string,

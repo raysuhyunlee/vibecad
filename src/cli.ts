@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { build, CadError, getKernel, type BuildOutput, type Model } from "./eval.ts";
 import { ensureDir } from "./fs.ts";
-import { isInstance, STEP_FILE, stepEntry, type Instance } from "./lang.ts";
+import { defaultOptions, isInstance, optionsOf, STEP_FILE, stepEntry, type Instance } from "./lang.ts";
 
 // Projects anywhere on disk import the language as "vibecad".
 registerHooks({
@@ -30,7 +30,8 @@ const DEV_FILE = ".vibecad/dev.json";
 const USAGE = `vibecad <command> [entry=main.cad.ts]
 An entry is a *.cad.ts or STEP file.
 
-Commands that build also take --pose joint=value,other/joint=value.
+Commands that build also take --pose joint=value,other/joint=value
+and --option name=value,other=value for an entry that declares options.
 
   build [entry] [--steps] [--out-dir dir]
                                  Build; writes ${OUT_DIR}/model.json and meshes.json
@@ -60,10 +61,26 @@ function describe(e: unknown) {
   return { code: "ERROR", message: e.message, at: at?.trim() };
 }
 
-async function load(entry: string): Promise<Instance> {
-  if (STEP_FILE.test(entry)) return stepEntry(entry);
+type Options = NonNullable<Model["options"]>;
+
+async function load(entry: string, chosen: Record<string, string> = {}): Promise<{ root: Instance; options?: Options }> {
+  const names = Object.keys(chosen);
+  if (STEP_FILE.test(entry)) {
+    if (names.length) throw new CadError("BAD_OPTION", `${entry} has no options`);
+    return { root: stepEntry(entry) };
+  }
   const mod = await import(pathToFileURL(resolve(entry)).href);
-  const value = typeof mod.default === "function" ? mod.default() : mod.default;
+  const choices = optionsOf(mod.default);
+  for (const name of names) {
+    const values = choices?.[name];
+    if (!values) {
+      throw new CadError("BAD_OPTION", `${entry} has no option "${name}"`, undefined, `Options: ${Object.keys(choices ?? {}).join(", ") || "none"}`);
+    }
+    if (!values.includes(chosen[name]!)) {
+      throw new CadError("BAD_OPTION", `Option "${name}" cannot be "${chosen[name]}"`, undefined, `Values: ${values.join(", ")}`);
+    }
+  }
+  const value = typeof mod.default === "function" ? mod.default(choices && chosen) : mod.default;
   if (!isInstance(value)) {
     throw new CadError(
       "BAD_ENTRY",
@@ -72,7 +89,17 @@ async function load(entry: string): Promise<Instance> {
       "For a part with required params, export a preview: export default () => Part({ ... })",
     );
   }
-  return value;
+  if (!choices) return { root: value };
+  const used = { ...defaultOptions(choices), ...chosen };
+  return { root: value, options: Object.entries(choices).map(([name, values]) => ({ name, values, value: used[name]! })) };
+}
+
+/** Builds an entry, keeping its options in the model. */
+async function buildEntry(entry: string, chosen?: Record<string, string>, opts?: Parameters<typeof build>[1]) {
+  const { root, options } = await load(entry, chosen);
+  const out = await build(root, opts);
+  if (options) out.model.options = options;
+  return out;
 }
 
 function encode(a: Float32Array | Uint32Array) {
@@ -94,6 +121,7 @@ function summary(m: Model) {
     })),
     joints: m.joints.map((j) => ({ path: j.path, kind: j.kind, value: j.value, min: j.min, max: j.max, src: j.src })),
     checks: m.checks,
+    ...(m.options && { options: m.options }),
   };
 }
 
@@ -119,6 +147,18 @@ function parsePose(text: string | undefined) {
   return pose;
 }
 
+function parseOptions(text: string | undefined) {
+  const chosen: Record<string, string> = {};
+  for (const item of text ? text.split(",") : []) {
+    const at = item.indexOf("=");
+    if (at <= 0 || item.slice(at + 1).trim() === "") {
+      throw new CadError("BAD_OPTION", `Cannot read "${item}" in --option`, undefined, "Use --option name=value,other=value");
+    }
+    chosen[item.slice(0, at)] = item.slice(at + 1);
+  }
+  return chosen;
+}
+
 function pick(out: BuildOutput, part?: string) {
   if (part) {
     const s = out.shapes.get(part);
@@ -142,6 +182,7 @@ async function main() {
       "out-dir": { type: "string" },
       message: { type: "string" },
       pose: { type: "string" },
+      option: { type: "string" },
       labels: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
@@ -168,7 +209,7 @@ async function main() {
   }
   if (cmd === "show") return show(o.part, o.face, o.message);
 
-  const out = await build(await load(entry), {
+  const out = await buildEntry(entry, parseOptions(o.option), {
     stepMeshes: !!o.steps,
     pose: parsePose(o.pose),
     sweeps: cmd === "test",
@@ -255,8 +296,8 @@ async function diff(ref: string | undefined, entry: string) {
   ensureDir(".vibecad/tmp");
   execFileSync("git", ["worktree", "add", "--detach", "-q", tmp, ref], { stdio: "pipe" });
   try {
-    const before = await build(await load(`${tmp}/${entry}`));
-    const after = await build(await load(entry));
+    const before = await buildEntry(`${tmp}/${entry}`);
+    const after = await buildEntry(entry);
     print({ ok: true, ref, ...compare(before.model, after.model) });
   } finally {
     execFileSync("git", ["worktree", "remove", "--force", tmp], { stdio: "pipe" });

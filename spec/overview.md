@@ -66,6 +66,7 @@
 - a joint's value lives in the source; `--pose` and the viewer only override it. Its path is `sub/name`, and a value outside its range is an error
 - a positive angle turns the moving part about its own port's +z; a positive travel separates the ports along the fixed port's +z
 - default export: an instance, or a function returning one; a part with required params exports a preview, `export default () => Part({ ... })`
+- options: `export default options({ side: ["left", "right"] }, (o) => Leg(o))` declares choices the app and `--option` can switch; the first value is the default, and an unknown name or value is `BAD_OPTION`
 - rules: `check minClearance noOverlap`, run on every build
 - sweeps: `noCollision(a, b, { joint, steps })` samples a joint's range, only in `vibecad test`, and reports the first failing value; collisions between samples can be missed
 - a check reads other poses with `q.at(joint, value)`
@@ -81,7 +82,7 @@
 ## cli
 
 - `build test query render export diff dev show`, see `vibecad --help`
-- `--pose joint=value,...` sets joint values for any command that builds, except `diff` and `dev`
+- `--pose joint=value,...` sets joint values for any command that builds, except `diff` and `dev`; `--option name=value,...` picks the entry's options the same way
 - `render --labels` draws all six views and iso with a number on each face, and prints each number's part, face id and views, plus the faces no view can see
 - each face is tagged in the view that shows it best, moved aside with a leader line when crowded, and in other views where its tag fits
 - the PNG holds only numbers because the kernel's bitmap font lacks many letters; it reads the kernel package's layout and font files, so a kernel upgrade must recheck this
@@ -110,6 +111,8 @@
 - other `.ts` files are plain code: not listed, but saving one rebuilds
 - the left panel has a slider per joint; moving one changes the view without a rebuild, using the joint data in `model.json`, and never writes the source
 - the viewer's pose stays with its tab through rebuilds; a message carries the joints moved away from the source
+- the left panel has a select per entry option; picking one rebuilds the tab with it and never writes the source; the selects are locked with a spinner while the tab builds; the pick stays with its tab, a message carries it, and a pick the source no longer has falls back to the defaults
+- while the tab on screen builds, the view says so, the same for a first build and a rebuild over the kept model
 - a tab's first build fits the camera to the model; a rebuild keeps the camera unless the model's bounds change, then fits again keeping the view direction
 - drag orbits; right drag or shift-drag pans; on a trackpad two-finger scroll pans and pinch zooms, and a mouse wheel zooms
 - a view cube in the corner turns with the camera and shows the world axes; side labels read upright with +Z up, top and bottom with +Y up, and the camera matches; clicking a face, named like `render`'s views, an edge or a corner turns the camera to look from that side, keeping target and distance
@@ -170,3 +173,4 @@
 - 2026-11-09: add `onFace`, `sweep` and `loft`; build refused fillets on convex edges and curved walls
 - 2026-11-10: tint the selected and hovered part from the parts list
 - 2026-11-10: ground an assembly on the world frame
+- 2026-11-10: add entry options, switched from the app or `--option`

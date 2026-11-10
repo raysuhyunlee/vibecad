@@ -125,6 +125,14 @@ button { font: inherit; color: inherit; }
 #source .line.at { background: var(--hover); box-shadow: inset 2px 0 var(--accent); }
 #source .num { flex: 0 0 32px; padding-right: var(--s2); color: var(--muted); text-align: right; user-select: none; }
 
+.option { display: flex; align-items: center; gap: var(--s1); padding: 0 var(--s2) var(--s2); }
+.option .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spinner { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+.option .spinner { display: none; }
+#options.busy .spinner { display: block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.option select:disabled { opacity: .4; }
+.option select { height: 24px; padding: 0 var(--s1); border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: inherit; }
 .joint { padding: 0 var(--s2); }
 .joint-head { display: flex; align-items: center; gap: var(--s1); }
 .joint-head .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -197,6 +205,7 @@ button { font: inherit; color: inherit; }
   pointer-events: none;
 }
 #empty button { pointer-events: auto; }
+#empty-text { padding: var(--s2) var(--s3); border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 #gizmo { position: absolute; top: var(--s3); right: var(--s3); width: 112px; height: 112px; }
 #tools {
   position: absolute;

@@ -36,6 +36,12 @@ const pipe = sweep(circle(1), spine([0, 0, 0]).line([0, 0, 20]).tangentArc([0, 1
 const neck = loft([{ profile: rect(20, 20), on: plane([0, 0, 0]) }, { profile: circle(5), on: plane([0, 0, 30]) }]).named("neck");
 ```
 
+An entry can declare options to switch in the app, or with `--option side=right`. The first value is the default.
+
+```ts
+export default options({ side: ["left", "right"] }, (o) => Leg(o));
+```
+
 Joints make an assembly move. Drag a joint's slider in the app, or set a pose from the CLI with `--pose pan=30`. `vibecad test` checks `noCollision` across the joint's range.
 
 ```ts

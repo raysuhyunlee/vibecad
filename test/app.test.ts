@@ -286,3 +286,32 @@ test("settings are not CLI flags", () => {
   assert.equal(r.status, 1);
   assert.equal(JSON.parse(r.stdout).ok, false);
 });
+
+test("an entry's options switch from the CLI and the app, and a stale pick falls back to the default", async () => {
+  const leg = (values: string) =>
+    `import { box, options, part } from "vibecad";\n` +
+    `const Leg = part("Leg", (p: { side: string }) => box(1, 1, 1).named("leg").translate(p.side === "right" ? 10 : -10, 0, 0));\n` +
+    `export default options({ side: [${values}] }, (o) => Leg(o));\n`;
+  writeFileSync(join(root, "leg.cad.ts"), leg(`"left", "right"`));
+  const cli = (...args: string[]) => JSON.parse(spawnSync(process.execPath, [CLI, "build", "leg.cad.ts", ...args], { cwd: root, encoding: "utf8" }).stdout);
+  assert.deepEqual(cli("--option", "side=right").options, [{ name: "side", values: ["left", "right"], value: "right" }]);
+  assert.equal(cli("--option", "side=up").error.code, "BAD_OPTION");
+  assert.equal(cli("--option", "foot=x").error.code, "BAD_OPTION");
+
+  const minX = async () => (await (await fetch(`${URL_BASE}/model?file=leg.cad.ts`)).json()).model.parts[0].bbox.min[0];
+  const settled = async (want: number) => {
+    for (let i = 0; i < 100; i++) {
+      const e: any = await nextEvent((x) => x.type === "hello");
+      if (!e.building && e.built && (await minX()) === want) return;
+      await new Promise((ok) => setTimeout(ok, 100));
+    }
+    assert.fail(`leg did not build at x=${want}`);
+  };
+  await new Promise((ok) => setTimeout(ok, 400));
+  assert.equal((await post("/entry", { file: "leg.cad.ts" })).status, 200);
+  await settled(-10.5);
+  assert.equal((await post("/options", { file: "leg.cad.ts", options: { side: "right" } })).status, 200);
+  await settled(9.5);
+  writeFileSync(join(root, "leg.cad.ts"), leg(`"left", "middle"`));
+  await settled(-10.5);
+});

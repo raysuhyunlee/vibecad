@@ -37,6 +37,7 @@ interface Tab {
   model?: Model;
   meshes?: string;
   error?: unknown;
+  options: Record<string, string>; // choices the person picked in the app; never written to the source
 }
 interface Ref {
   n: number;
@@ -49,7 +50,14 @@ interface Feedback {
   entry: string;
   refs: string[];
   pose?: string;
+  options?: string;
   screenshot?: string;
+}
+
+/** `name=value,...` for `--option`, or undefined when nothing is picked. */
+function optionFlag(options: Record<string, string> | undefined) {
+  const items = Object.entries(options ?? {}).map(([k, v]) => `${k}=${v}`);
+  return items.length ? items.join(",") : undefined;
 }
 
 /** True when `child` is inside `root`, so a request cannot read outside it. */
@@ -158,9 +166,12 @@ export async function serve(o: {
     const file = entry;
     if (!file) return;
     building?.kill();
-    const child = spawn(process.execPath, [CLI, "build", file, "--steps", "--out-dir", PREVIEW_DIR], { stdio: ["ignore", "pipe", "ignore"] });
+    const chosen = optionFlag(tabs.get(file)?.options);
+    const args = [CLI, "build", file, "--steps", "--out-dir", PREVIEW_DIR, ...(chosen ? ["--option", chosen] : [])];
+    const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "ignore"] });
     building = child;
     buildingFile = file;
+    emit({ type: "entry", ...entryState() }); // the viewer shows the build running
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     child.on("close", (_code, signal) => {
@@ -178,6 +189,10 @@ export async function serve(o: {
           tab.size = modelText.length + tab.meshes.length;
           tab.version = ++version;
           tab.error = undefined;
+        } else if (r.error?.code === "BAD_OPTION" && chosen) {
+          // The source no longer has a picked choice: drop the picks and build its defaults.
+          tab.options = {};
+          return runBuild();
         } else tab.error = r.error;
       } catch {
         tab.error = { code: "BUILD_CRASHED", message: "The build process crashed. Run vibecad build for details." };
@@ -192,7 +207,7 @@ export async function serve(o: {
   };
 
   // --- Project --------------------------------------------------------------
-  const newTab = (): Tab => ({ version: 0, stale: true, leftAt: 0, size: 0 });
+  const newTab = (): Tab => ({ version: 0, stale: true, leftAt: 0, size: 0, options: {} });
   /** Shows a tab, opening it if needed. Only a tab that may be out of date builds. */
   const switchTo = (next: string | undefined) => {
     clearTimeout(timer);
@@ -286,10 +301,11 @@ export async function serve(o: {
         `Read AGENTS.md if it exists. Change the TypeScript source, never generated files. ` +
         `The preview rebuilds on every save. Verify with \`${cli} build <entry>\` and \`${cli} test <entry>\`. ` +
         `Use \`${cli} render <entry>\` to see the result, add \`--labels\` to number each face and get its name, and use\`${cli} show --part P --face F --message M\` ` +
-        `to point at geometry when you ask the person something. Commands that build take \`--pose joint=value,...\`. Reply in the person's language, briefly.\n\n`
+        `to point at geometry when you ask the person something. Commands that build take \`--pose joint=value,...\` and \`--option name=value,...\`. Reply in the person's language, briefly.\n\n`
       : "";
     const body = batch.map((f) => {
       const lines = [`Viewing: ${f.entry}`, `Person said: ${JSON.stringify(f.text)}`];
+      if (f.options) lines.push(`They picked options in the viewer, without changing the source. Points and the screenshot use them: --option ${f.options}`);
       if (f.pose) lines.push(`They moved joints in the viewer, without changing the source. Points and the screenshot use this pose: --pose ${f.pose}`);
       if (f.refs.length) lines.push("They pointed at (tokens like [1] in the text refer to these):", ...f.refs);
       if (f.screenshot) lines.push(`Screenshot of what they see: ${f.screenshot}`);
@@ -413,6 +429,15 @@ export async function serve(o: {
         setEntry(next);
         return json(res, { ok: true });
       }
+      if (path === "/options") {
+        const b = JSON.parse(await readBody(req));
+        const tab = tabs.get(String(b.file));
+        if (!tab) return json(res, { error: "That file is not open." }, 400);
+        tab.options = Object.fromEntries(Object.entries(b.options ?? {}).map(([k, v]) => [k, String(v)]));
+        tab.stale = true;
+        if (b.file === entry) runBuild();
+        return json(res, { ok: true });
+      }
       if (path === "/tab/close") {
         closeTab(String(JSON.parse(await readBody(req)).file));
         return json(res, { ok: true });
@@ -431,6 +456,8 @@ export async function serve(o: {
         const feedback: Feedback = { text, entry, refs: refs.map(describeRef) };
         const pose = Object.entries(b.pose ?? {}).filter(([, v]) => Number.isFinite(v)).map(([j, v]) => `${j}=${v}`);
         if (pose.length) feedback.pose = pose.join(",");
+        const options = optionFlag(tabs.get(entry)?.options);
+        if (options) feedback.options = options;
         if (typeof b.screenshot === "string" && b.screenshot.startsWith("data:image/png;base64,")) {
           ensureDir(".vibecad/feedback");
           feedback.screenshot = `.vibecad/feedback/${Date.now()}-${id}.png`;

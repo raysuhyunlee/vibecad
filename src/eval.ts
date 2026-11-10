@@ -104,6 +104,8 @@ export interface Model {
   ground?: string;
   checks: CheckResult[];
   hash: string;
+  /** The entry's choices and the value each was built with. */
+  options?: { name: string; values: readonly string[]; value: string }[];
 }
 export interface BuildOutput {
   model: Model;

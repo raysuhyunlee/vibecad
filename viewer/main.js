@@ -62,7 +62,8 @@ let hoverKey = "";
 let opened = { root: null, entry: null, files: [], truncated: false, tabs: [] };
 const views = new Map(); // open file -> its kept build: { world, model, parts, stepMeshes, version }
 const keptByTab = new Map(); // open file -> what outlives its build: { refs, nextRef, draft, pose, camera }
-let buildPending = false;
+let buildPending = false; // the tab on screen is building
+let optionsBusy = false; // the tab on screen is rebuilding, so a pick waits
 let loadToken = 0;
 const collapsed = new Set();
 const LAST_OPENED = "vibecad.lastOpened";
@@ -762,7 +763,38 @@ function jointRow(j) {
   return el;
 }
 
-// --- Design panel: parts, joints, feature history, source, checks -----------
+// --- Options: the entry's choices; picking one rebuilds ----------------------
+function optionRow(o) {
+  const el = document.createElement("label");
+  el.className = "option";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = o.name;
+  const select = document.createElement("select");
+  select.append(...o.values.map((v) => new Option(v, v, false, v === o.value)));
+  select.onchange = () => {
+    const options = Object.fromEntries(model.options.map((x) => [x.name, x.value]));
+    options[o.name] = select.value;
+    post("/options", { file: opened.entry, options });
+    paintOptions(true);
+    buildPending = true;
+    renderEmpty();
+  };
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+  spinner.setAttribute("role", "status");
+  spinner.setAttribute("aria-label", "Building");
+  el.append(name, spinner, select);
+  return el;
+}
+/** Locks the pickers while the tab on screen builds, so the person sees the pick working. */
+function paintOptions(busy) {
+  optionsBusy = busy;
+  $("options").classList.toggle("busy", busy);
+  for (const s of $("options").querySelectorAll("select")) s.disabled = busy;
+}
+
+// --- Design panel: parts, options, joints, feature history, source, checks --
 function row(label, dim, current, onclick) {
   const b = document.createElement("button");
   b.className = "row";
@@ -780,7 +812,7 @@ function row(label, dim, current, onclick) {
 function renderDesign() {
   $("parts").hidden = !model;
   if (!model) {
-    $("joints").hidden = $("steps").hidden = $("checks").hidden = true;
+    $("options").hidden = $("joints").hidden = $("steps").hidden = $("checks").hidden = true;
     return;
   }
   if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
@@ -797,6 +829,9 @@ function renderDesign() {
     b.onpointerleave = () => setHoveredPart(null);
     return b;
   }));
+  $("options").hidden = !model.options?.length;
+  $("options").replaceChildren(...(model.options ?? []).map(optionRow));
+  paintOptions(optionsBusy);
   $("joints").hidden = model.joints.length === 0;
   $("joints").replaceChildren(...model.joints.map(jointRow));
   const part = selectedPart !== null ? parts.get(selectedPart) : null;
@@ -1013,7 +1048,8 @@ function applyEntry(e) {
   for (const file of [...keptByTab.keys()]) {
     if (!e.tabs.some((t) => t.file === file)) keptByTab.delete(file);
   }
-  buildPending = e.building === e.entry && !e.built;
+  buildPending = !!e.entry && e.building === e.entry;
+  paintOptions(buildPending);
   input.disabled = $("mic").disabled = !e.entry;
   updateSend();
   renderTabs();
