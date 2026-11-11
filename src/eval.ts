@@ -95,9 +95,17 @@ export interface MeshData {
   /** [triangleStart, triangleCount, faceIndex] triples. */
   faceGroups: number[];
 }
+/** A sub-assembly placed in the entry, at any depth; its parts' paths start with `path/`. */
+export interface PlaceResult {
+  path: string;
+  type: string;
+  src: Src;
+}
 export interface Model {
   type: string;
   parts: PartResult[];
+  /** Sub-assembly places, parents before children. */
+  assemblies: PlaceResult[];
   /** Ordered from the fixed part outward, so a joint comes after those that carry it. */
   joints: JointResult[];
   /** Path of the part fixed to the world by the entry's ground. */
@@ -887,6 +895,10 @@ function collectLeaves(node: Node, out: Node[]) {
   if (node.inst.solid) out.push(node);
   for (const c of node.children.values()) collectLeaves(c, out);
 }
+function collectAssemblies(node: Node, out: PlaceResult[]) {
+  if (node.path && !node.inst.solid) out.push({ path: node.path, type: node.inst.typeName, src: node.inst.src });
+  for (const c of node.children.values()) collectAssemblies(c, out);
+}
 function collectChecks(node: Node, out: Array<{ c: CheckDef; scope: Node }>) {
   out.push(...node.inst.checks.map((c) => ({ c, scope: node })));
   for (const c of node.children.values()) collectChecks(c, out);
@@ -1082,7 +1094,7 @@ export async function build(
         const solo = tree(origin, "");
         const checks = origin.checks.length ? checksOf(solo, () => b!.shape, new Map()) : [];
         opts.store.put(origin, b, {
-          model: { type: origin.typeName, parts: [b.part], joints: [], checks, hash: hashOf([b.part], [b.mesh]) },
+          model: { type: origin.typeName, parts: [b.part], assemblies: [], joints: [], checks, hash: hashOf([b.part], [b.mesh]) },
           meshes: [b.mesh], shapes: new Map([["", b.shape]]), stepMeshes: new Map(b.steps ? [["", b.steps]] : []),
         });
       }
@@ -1115,9 +1127,11 @@ export async function build(
   }
 
   const checks = checksOf(top, (n) => placedShapes.get(n)!, pose);
+  const assemblies: PlaceResult[] = [];
+  collectAssemblies(top, assemblies);
   return {
     model: {
-      type: root.typeName, parts, joints: solved.joints, ...(solved.ground !== undefined && { ground: solved.ground }),
+      type: root.typeName, parts, assemblies, joints: solved.joints, ...(solved.ground !== undefined && { ground: solved.ground }),
       checks, hash: hashOf(parts, meshes),
     },
     meshes, shapes, stepMeshes,

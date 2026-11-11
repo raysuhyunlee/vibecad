@@ -103,10 +103,16 @@ button { font: inherit; color: inherit; }
 }
 .row:hover { background: var(--hover); }
 .row[aria-current="true"] { background: var(--accent); color: var(--accent-text); }
-.row[aria-current="true"] .dim { color: inherit; opacity: .8; }
+.row[aria-current="true"] .row.place { align-items: center; gap: var(--s1); }
+.row.place svg { width: 12px; height: 12px; flex: none; color: var(--muted); }
+.row.place[aria-expanded="true"] svg { transform: rotate(90deg); }
+.dim { color: inherit; opacity: .8; }
 .row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .ground { width: 12px; height: 12px; flex: none; align-self: center; color: var(--muted); }
 .row[aria-current="true"] .ground { color: inherit; }
+.row.place { align-items: center; gap: var(--s1); }
+.row.place svg { width: 12px; height: 12px; flex: none; color: var(--muted); }
+.row.place[aria-expanded="true"] svg { transform: rotate(90deg); }
 .dim { color: var(--muted); font-size: var(--font-sm); white-space: nowrap; }
 .spacer { margin-left: auto; }
 

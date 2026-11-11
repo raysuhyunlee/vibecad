@@ -47,7 +47,7 @@ let parts = new Map(); // path -> { info, mesh, edges, groups, geometry, matrix 
 let pose = {}; // joint path -> value the person set; kept by tab, never written to the source
 let stepMeshes = {};
 let selectedPart = null;
-let hoveredPart = null; // part row under the pointer
+let hoveredPart = null; // part or sub-assembly path of the row under the pointer
 let previewStep = null;
 let previewObject = null;
 let previous = null; // last model, to flash what changed
@@ -777,6 +777,56 @@ function row(label, dim, current, onclick) {
   b.onclick = onclick;
   return b;
 }
+const openPlaces = new Set(); // sub-assembly paths unfolded in the parts list; folded by default
+const leafName = (path) => path.slice(path.lastIndexOf("/") + 1);
+/** The parts list as the instance tree: each sub-assembly folds over the parts placed under it. */
+function partRows() {
+  const types = new Map((model.assemblies ?? []).map((a) => [a.path, a.type]));
+  const out = [], shown = new Set();
+  for (const p of model.parts) {
+    const segs = p.path.split("/");
+    let hidden = false;
+    for (let i = 1; i < segs.length && !hidden; i++) {
+      const path = segs.slice(0, i).join("/");
+      if (!shown.has(path)) {
+        shown.add(path);
+        out.push(placeRow(path, types.get(path) ?? "", i - 1));
+      }
+      hidden = !openPlaces.has(path);
+    }
+    if (hidden) continue;
+    const b = row(p.path ? leafName(p.path) : p.type, p.type, selectedPart === p.path, () => {
+      selectedPart = selectedPart === p.path ? null : p.path;
+      setPreview(null);
+      renderDesign();
+    });
+    b.title = p.path;
+    b.style.paddingLeft = `calc(var(--s2) + ${(segs.length - 1) * 16}px)`;
+    if (model.ground === p.path) {
+      b.firstChild.insertAdjacentHTML("afterend", '<svg class="ground" role="img" aria-label="Ground"><title>Ground</title><use href="#i-pin"/></svg>');
+    }
+    b.onpointerenter = () => setHoveredPart(p.path);
+    b.onpointerleave = () => setHoveredPart(null);
+    out.push(b);
+  }
+  return out;
+}
+function placeRow(path, type, depth) {
+  const open = openPlaces.has(path);
+  const b = row(leafName(path), type, false, () => {
+    if (open) openPlaces.delete(path);
+    else openPlaces.add(path);
+    renderDesign();
+  });
+  b.classList.add("place");
+  b.title = path;
+  b.style.paddingLeft = `calc(var(--s2) + ${depth * 16}px)`;
+  b.setAttribute("aria-expanded", open);
+  b.insertAdjacentHTML("afterbegin", '<svg aria-hidden="true"><use href="#i-chevron"/></svg>');
+  b.onpointerenter = () => setHoveredPart(path);
+  b.onpointerleave = () => setHoveredPart(null);
+  return b;
+}
 function renderDesign() {
   $("parts").hidden = !model;
   if (!model) {
@@ -784,19 +834,7 @@ function renderDesign() {
     return;
   }
   if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
-  $("parts").replaceChildren(...model.parts.map((p) => {
-    const b = row(p.path || p.type, p.type, selectedPart === p.path, () => {
-      selectedPart = selectedPart === p.path ? null : p.path;
-      setPreview(null);
-      renderDesign();
-    });
-    if (model.ground === p.path) {
-      b.firstChild.insertAdjacentHTML("afterend", '<svg class="ground" role="img" aria-label="Ground"><title>Ground</title><use href="#i-pin"/></svg>');
-    }
-    b.onpointerenter = () => setHoveredPart(p.path);
-    b.onpointerleave = () => setHoveredPart(null);
-    return b;
-  }));
+  $("parts").replaceChildren(...partRows());
   $("joints").hidden = model.joints.length === 0;
   $("joints").replaceChildren(...model.joints.map(jointRow));
   const part = selectedPart !== null ? parts.get(selectedPart) : null;
@@ -869,7 +907,7 @@ function paintParts() {
     p.mesh.visible = !previewing || path !== selectedPart;
     p.mesh.material = previewing ? ghostMaterial
       : path === selectedPart ? selectedMaterial
-      : path === hoveredPart ? hoverPartMaterial
+      : hoveredPart !== null && (path === hoveredPart || path.startsWith(`${hoveredPart}/`)) ? hoverPartMaterial
       : partMaterial;
   }
 }

@@ -142,6 +142,7 @@
 - the agent points back with `vibecad show`
 - selecting a part in the parts list tints it in the view; hovering its row tints it lighter
 - the parts list marks the grounded part with a pin icon
+- the parts list is the instance tree: a placed sub-assembly is a row, named by its place and type, that folds its parts, folded at first; hovering it tints all of them
 - a feature-history list replays any part step by step, next to its source
 
 ## agent sessions
@@ -188,3 +189,4 @@
 - 2026-11-10: add entry options, switched from the app or `--option`
 - 2026-11-10: keep each build on disk; drop `keepMb`
 - 2026-11-10: a part or assembly is an instance, and a `.cad.ts` file is one, replacing options; assemblies place files' instances and reuse their kept builds
+- 2026-11-11: show the parts list as the instance tree of sub-assemblies

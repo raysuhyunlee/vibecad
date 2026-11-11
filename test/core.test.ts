@@ -540,6 +540,7 @@ test("mates place parts, nest through assemblies, and run checks", async () => {
   assert.deepEqual(at("c").min, [-5, -5, 20]);
   assert.deepEqual(at("far").min, [-5, -5, 33]);
   assert.deepEqual(model.checks.map((c) => c.pass), [true, false]);
+  assert.deepEqual(model.assemblies.map((a) => [a.path, a.type]), [["s", "Stack"]]);
 });
 
 test("an unconnected part is an error, not a part at the origin", async () => {
