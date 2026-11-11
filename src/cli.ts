@@ -6,7 +6,7 @@ import { registerHooks } from "node:module";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { build, CadError, getKernel, type BuildOutput, type MeshData, type Model, type PartBuild, type PartStore } from "./eval.ts";
+import { build, CadError, FEATURES_VERSION, getKernel, type BuildOutput, type KeptFeature, type MeshData, type Model, type PartBuild, type PartStore } from "./eval.ts";
 import { buildDir, digest, ensureDir, isFresh, toolDigest, type BuildInputs } from "./fs.ts";
 import { isInstance, originOf, STEP_FILE, stepEntry, type Instance, type Solid } from "./lang.ts";
 
@@ -157,12 +157,47 @@ function inputsOf(file: string, inst: Instance, steps: boolean): BuildInputs {
   return { tool: toolDigest(), steps, files };
 }
 
+/**
+ * A part's kept features: `features.brep` is their BReps one after another, and `features.json` is
+ * `{ version, features: { key: { faces, at, size } } }`, where each BRep lies in that file. Another version's are ignored.
+ */
+type FeatureIndex = { version: string; features: Record<string, { faces: KeptFeature["faces"]; at: number; size: number }> };
+function readFeatures(dir: string) {
+  const out = new Map<string, KeptFeature>();
+  try {
+    const index: FeatureIndex = JSON.parse(readFileSync(`${dir}/features.json`, "utf8"));
+    if (index.version !== FEATURES_VERSION) return out;
+    const breps = readFileSync(`${dir}/features.brep`);
+    for (const [key, f] of Object.entries(index.features)) {
+      if (f.at + f.size > breps.byteLength) return new Map(); // the two files do not match
+      out.set(key, { faces: f.faces, brep: breps.subarray(f.at, f.at + f.size) });
+    }
+    return out;
+  } catch {
+    return new Map(); // none yet, or damaged
+  }
+}
+/** The index goes last, so it never points into a half-written BRep file. */
+function writeFeatures(dir: string, features: Map<string, KeptFeature>) {
+  rmSync(`${dir}/features.json`, { force: true });
+  const index: FeatureIndex = { version: FEATURES_VERSION, features: {} };
+  let at = 0;
+  for (const [key, f] of features) {
+    index.features[key] = { faces: f.faces, at, size: f.brep.byteLength };
+    at += f.brep.byteLength;
+  }
+  writeFileSync(`${dir}/features.brep`, Buffer.concat([...features.values()].map((f) => f.brep)));
+  writeFileSync(`${dir}/features.json`, JSON.stringify(index));
+}
+
 /** Keeps each exported part's build in its own folder, so an assembly reuses it and its tab opens at once. */
 function diskStore(k: Awaited<ReturnType<typeof getKernel>>): PartStore {
   const placeOf = (inst: Instance) => {
     const file = fileOf.get(inst);
     return file && !file.startsWith("../") ? file : undefined; // only parts inside the project are kept
   };
+  // Features each part's build used, kept or new; only these are written back.
+  const used = new Map<Instance, Map<string, KeptFeature>>();
   return {
     get(inst, steps) {
       const file = placeOf(inst);
@@ -188,6 +223,16 @@ function diskStore(k: Awaited<ReturnType<typeof getKernel>>): PartStore {
       const file = placeOf(inst);
       if (!file) return;
       writeOutputs(solo, buildDir(file), inputsOf(file, inst, !!b.steps), k.toBREPBinary(b.shape));
+      const features = used.get(inst);
+      if (features) writeFeatures(buildDir(file), features);
+    },
+    features(inst) {
+      const file = placeOf(inst);
+      if (!file) return undefined;
+      const kept = readFeatures(buildDir(file));
+      const now = new Map<string, KeptFeature>();
+      used.set(inst, now);
+      return { get: (key) => kept.get(key), put: (key, f) => void now.set(key, f) };
     },
   };
 }
@@ -256,7 +301,7 @@ function parsePose(text: string | undefined) {
   return pose;
 }
 
-/** Builds an entry, reusing kept part builds when `keep` is set. */
+/** Builds an entry, reusing kept part builds and features when `keep` is set. */
 async function buildEntry(entry: string, opts: Omit<NonNullable<Parameters<typeof build>[1]>, "store"> = {}, keep = true) {
   const { root, file } = await load(entry);
   const out = await build(root, { ...opts, ...(keep && { store: diskStore(await getKernel()) }) });

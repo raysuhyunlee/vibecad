@@ -146,13 +146,30 @@ export interface BuildOutput {
   stepMeshes: Map<string, Map<number, MeshData>>;
 }
 
+/** A face's name, and the feature that made it, whose source line it points at. */
 interface Tag {
   name: string;
-  src: Src;
+  node: Solid;
 }
 interface Evaluated {
   shape: ShapeHandle;
   tags: Map<number, Tag>;
+}
+
+/** A feature's result kept between runs: its solid as BRep, and each face's name and the key of the feature that made it, in face order. */
+export interface KeptFeature {
+  brep: Uint8Array;
+  faces: Array<{ name: string; from: string }>;
+}
+/**
+ * Kept features from another version are rebuilt. Bump this when a change to evaluation can change
+ * any feature's solid or face names; the pinned kernel version counts on its own.
+ */
+export const FEATURES_VERSION = `1/occt-wasm@${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies["occt-wasm"]}`;
+/** One part's feature results by key, so a changed part rebuilds only the features after the change. `put` gets every feature the build used, kept or new. */
+export interface FeatureStore {
+  get(key: string): KeptFeature | undefined;
+  put(key: string, feature: KeptFeature): void;
 }
 
 let kernelPromise: Promise<OcctKernel> | undefined;
@@ -165,6 +182,9 @@ export function getKernel() {
 class Evaluator {
   readonly k: OcctKernel;
   readonly memo = new Map<Solid, Evaluated>();
+  /** The features of the part being built. */
+  store: FeatureStore | undefined;
+  readonly keys = new Map<Solid, string>();
   constructor(k: OcctKernel) {
     this.k = k;
   }
@@ -179,6 +199,13 @@ class Evaluator {
   eval(n: Solid): Evaluated {
     const hit = this.memo.get(n);
     if (hit) return hit;
+    const key = this.store && this.keyOf(n);
+    const kept = key && this.load(n, key);
+    if (kept) {
+      this.store!.put(key, kept.feature);
+      this.memo.set(n, kept);
+      return kept;
+    }
     const inputs = n.inputs.map((i) => this.eval(i));
     let r: Evaluated;
     try {
@@ -188,8 +215,59 @@ class Evaluator {
       const msg = e instanceof Error ? e.message : String(e);
       throw new CadError("OP_FAILED", `${n.op} "${n.name}" failed: ${msg}`, n.src, hintFor(n));
     }
+    if (key) this.save(key, r);
     this.memo.set(n, r);
     return r;
+  }
+
+  /**
+   * What decides a feature's result: its op, name, arguments and inputs, and a loaded file's content.
+   * Not its source line, so moving code keeps the key.
+   */
+  keyOf(n: Solid): string {
+    let key = this.keys.get(n);
+    if (key === undefined) {
+      const text = JSON.stringify(
+        [n.op, n.name, n.args, n.inputs.map((i) => this.keyOf(i))],
+        (_, v) => (v instanceof Solid ? this.keyOf(v) : v),
+      );
+      const h = createHash("sha256").update(text);
+      if (n.op === "importStep" && existsSync(String(n.args.path))) h.update(readFileSync(String(n.args.path)));
+      key = h.digest("hex").slice(0, 32);
+      this.keys.set(n, key);
+    }
+    return key;
+  }
+
+  save(key: string, r: Evaluated) {
+    const faces = this.faces(r.shape).map((f) => {
+      const t = r.tags.get(this.hash(f));
+      return t ? { name: t.name, from: this.keyOf(t.node) } : undefined;
+    });
+    if (faces.every((f) => f !== undefined)) this.store!.put(key, { brep: this.k.toBREPBinary(r.shape), faces });
+  }
+
+  /** A kept result, with each face pointing at the feature in this graph that made it. */
+  load(n: Solid, key: string): (Evaluated & { feature: KeptFeature }) | undefined {
+    const kept = this.store!.get(key);
+    if (!kept) return undefined;
+    try {
+      const shape = this.k.fromBREPBinary(kept.brep);
+      const fs = this.faces(shape);
+      if (fs.length !== kept.faces.length) return undefined;
+      const nodes = new Map<string, Solid>();
+      const walk = (s: Solid) => {
+        const k = this.keyOf(s);
+        if (nodes.has(k)) return;
+        nodes.set(k, s);
+        s.inputs.forEach(walk);
+      };
+      walk(n);
+      const tags = new Map(fs.map((f, i): [number, Tag] => [this.hash(f), { name: kept.faces[i]!.name, node: nodes.get(kept.faces[i]!.from) ?? n }]));
+      return { shape, tags, feature: kept };
+    } catch {
+      return undefined; // a damaged file is rebuilt
+    }
   }
 
   /** Carries input tags across an operation using OCCT's history. New faces get this op's tag. */
@@ -215,7 +293,7 @@ class Evaluator {
         i += 2 + count;
       }
     }
-    for (const h of present) if (!tags.has(h)) tags.set(h, { name: n.name, src: n.src });
+    for (const h of present) if (!tags.has(h)) tags.set(h, { name: n.name, node: n });
     return { shape: result, tags };
   }
 
@@ -238,7 +316,7 @@ class Evaluator {
       } else {
         face = "side";
       }
-      tags.set(this.hash(f), { name: `${n.name}.${face}`, src: n.src });
+      tags.set(this.hash(f), { name: `${n.name}.${face}`, node: n });
     }
     return { shape, tags };
   }
@@ -258,7 +336,7 @@ class Evaluator {
   /** Names caps and walls from history. A wall the kernel does not trace to a segment is "side". */
   tagWalls(n: Solid, p: Profile, caps: [string, string], ev: EvolutionData, edges: ShapeHandle[], sources: ShapeHandle[]): Evaluated {
     const tags = new Map<number, Tag>();
-    const tag = (h: number, name: string) => tags.set(h, { name: `${n.name}.${name}`, src: n.src });
+    const tag = (h: number, name: string) => tags.set(h, { name: `${n.name}.${name}`, node: n });
     for (const h of ev.firstShape) tag(h, caps[0]);
     for (const h of ev.lastShape) tag(h, caps[1]);
     const segOf = new Map(edges.map((e) => [this.hash(e), this.segmentOf(e, sources)]));
@@ -458,7 +536,7 @@ class Evaluator {
         if (faces.length === 0) {
           throw new CadError("EMPTY_RESULT", `${a.path} has no faces`, n.src, hintFor(n));
         }
-        const tags = new Map(faces.map((f, i): [number, Tag] => [this.hash(f), { name: `${n.name}.face[${i}]`, src: n.src }]));
+        const tags = new Map(faces.map((f, i): [number, Tag] => [this.hash(f), { name: `${n.name}.face[${i}]`, node: n }]));
         return { shape, tags };
       }
       case "cut":
@@ -1030,6 +1108,8 @@ export interface PartBuild {
 export interface PartStore {
   get(inst: Instance, steps: boolean): PartBuild | undefined;
   put(inst: Instance, part: PartBuild, solo: BuildOutput): void;
+  /** The kept features of a part about to be built. */
+  features?(inst: Instance): FeatureStore | undefined;
 }
 
 function evalPart(ev: Evaluator, inst: Instance, withSteps: boolean): PartBuild {
@@ -1047,7 +1127,7 @@ function evalPart(ev: Evaluator, inst: Instance, withSteps: boolean): PartBuild 
     return {
       id: n === 1 ? t.name : `${t.name}~${n}`,
       name: t.name,
-      src: t.src,
+      src: t.node.src,
       surface: k.surfaceType(f),
       area: round(k.getSurfaceArea(f)),
       center: tuple(k.getSurfaceCenterOfMass(f)).map(round) as Vec3,
@@ -1171,6 +1251,7 @@ export async function build(
     if (own.has(origin)) continue;
     let b = opts.store?.get(origin, withSteps);
     if (!b) {
+      ev.store = opts.store?.features?.(origin);
       b = evalPart(ev, origin, withSteps);
       if (opts.store) {
         const solo = tree(origin, "");

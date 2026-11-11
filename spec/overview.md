@@ -95,6 +95,10 @@
 - an assembly reuses the kept build of each part while it is fresh, and builds and keeps the rest; sub-assemblies at any depth compose from the same part builds, and each part is built once however often it is placed
 - each build records what it read in `inputs.json`: a content digest of the file and every file it imports, any STEP file it loads, and vibecad's own source, and whether it has feature meshes; a build is fresh while all of them match
 - the app and the CLI share kept builds, so an agent's build serves the app too
+- a part's build also keeps its features: their BReps one after another in `features.brep`, and in `features.json` each one's key, face names and place in that file; a part that changed rebuilds only the features its change reaches
+- a feature's key is a digest of its op, name, arguments and inputs, and a loaded STEP file's content, but not its source line, so moving code keeps it; a kept face points at the line of the feature that made it in the current source
+- `features.json` holds only the features of the part's last build, and records `FEATURES_VERSION` in `src/eval.ts` with the kernel version; from another version it is ignored and the part builds from scratch
+- bump `FEATURES_VERSION` with any change to evaluation that can change a feature's solid or face names, or stale geometry is reused
 - `render --labels` draws all six views and iso with a number on each face, and prints each number's part, face id and views, plus the faces no view can see
 - each face is tagged in the view that shows it best, moved aside with a leader line when crowded, and in other views where its tag fits
 - the PNG holds only numbers because the kernel's bitmap font lacks many letters; it reads the kernel package's layout and font files, so a kernel upgrade must recheck this
@@ -174,7 +178,6 @@
 - wip: closed-loop linkages and more joint kinds (cylindrical, ball, planar)
 - wip: drawn strokes stay in place when a joint moves; pins follow their part
 - wip: sketch constraint solver, draft, drawings, sheet metal
-- wip: per-feature build cache
 - wip: isolating the agent from the person's global settings
 - wip: npm distribution. Node will not strip types under `node_modules`, so vibecad runs from this repo today; a release needs compiled output
 - wip: local speech recognition. Chrome's Web Speech sends audio to a cloud service
@@ -203,3 +206,4 @@
 - 2026-11-10: a part or assembly is an instance, and a `.cad.ts` file is one, replacing options; assemblies place files' instances and reuse their kept builds
 - 2026-11-11: show the parts list as the instance tree of sub-assemblies
 - 2026-11-12: click to measure faces and edges; pins move to draw mode
+- 2026-11-12: keep each feature's result, so a changed part rebuilds only what its change reaches

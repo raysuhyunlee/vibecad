@@ -8,7 +8,7 @@ import {
   assembly, box, check, circle, closedSpline, cylinder, edges, extrude, helix, importStep, loft, mate, minClearance, noCollision, offset, onFace, outerTangent, part, path,
   plane, polygon, port, rect, revolute, revolve, roundedRect, slider, spine, sweep, world,
 } from "../src/index.ts";
-import { build, CadError, getKernel } from "../src/eval.ts";
+import { build, CadError, getKernel, type KeptFeature, type PartStore } from "../src/eval.ts";
 import type { Vec3 } from "../src/lang.ts";
 import { renderLabeled } from "../src/render.ts";
 
@@ -752,4 +752,38 @@ test("mesh face groups cover every triangle exactly once", async () => {
     next += m.faceGroups[i + 1]!;
   }
   assert.equal(next, m.indices.length / 3);
+});
+
+test("kept features are reused, keep their source lines, and give the same model", async () => {
+  const kept = new Map<string, KeptFeature>();
+  const used: string[] = [];
+  const store: PartStore = {
+    get: () => undefined,
+    put: () => {},
+    features: () => ({
+      get: (key) => {
+        const f = kept.get(key);
+        if (f) used.push(f.faces[0]!.name);
+        return f;
+      },
+      put: (key, f) => void kept.set(key, f),
+    }),
+  };
+  await build(plate({ hole: 2 }), { store });
+  used.length = 0;
+  const warm = await build(plate({ hole: 3 }), { store });
+  assert.deepEqual([...new Set(used)], ["base.left"], "only the unchanged box is reused");
+  const plain = await build(plate({ hole: 3 }));
+  assert.equal(warm.model.hash, plain.model.hash);
+  assert.deepEqual(warm.model.parts[0]!.faces, plain.model.parts[0]!.faces);
+
+  // The same feature written on another line points at that line.
+  const moved = part("Moved", () =>
+    box(40, 20, 5).named("base"),
+  );
+  const out = await build(moved(), { store });
+  assert.ok(used.length > 1, "the box is reused");
+  const line = out.model.parts[0]!.faces[0]!.src.line;
+  assert.notEqual(line, plain.model.parts[0]!.faces.find((f) => f.name.startsWith("base."))!.src.line);
+  assert.equal(line, out.model.parts[0]!.steps[0]!.src.line);
 });
