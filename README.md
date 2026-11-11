@@ -11,7 +11,7 @@ npm install
 node src/cli.ts dev   # open the printed URL
 ```
 
-Open a project folder in the app, for example `examples/servo-bracket`, and pick a file. Click a face, hold Space and talk, or type. `D` draws, `F` fits, `Esc` clears.
+Open a project folder in the app, for example `examples/servo-bracket`, and pick a file. Click faces or edges to measure them. Press `D` for the pen, click a face to pin it, then hold Space and talk, or type. `F` fits, `Esc` clears.
 
 Settings live in `~/.vibecad/config.json`: `port`, `agent`, `model`.
 

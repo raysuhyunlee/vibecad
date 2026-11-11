@@ -134,7 +134,7 @@
 
 ## friction-free human-agent feedback loop
 
-- click a face to pin it, numbered, with its source line shown
+- in draw mode, click a face to pin it, numbered, with its source line shown
 - drag in draw mode to mark an area; the stroke resolves to the faces under it
 - hold Space to talk; pins made while talking land in the sentence where they were said: "this [1] should match that [2]"
 - sending carries text, face ids, source lines, 3D points and a screenshot
@@ -144,6 +144,18 @@
 - the parts list marks the grounded part with a pin icon
 - the parts list is the instance tree: a placed sub-assembly is a row, named by its place and type, that folds its parts, folded at first; hovering it tints all of them
 - a feature-history list replays any part step by step, next to its source
+
+## measuring
+
+- outside draw mode, a click picks a face, or an edge within a few pixels of the pointer; picking it again drops it, and empty space clears all
+- the picks' dimensions show in the view's lower right corner, at the current pose
+- one face: area, and diameter for a cylinder or sphere; one edge: diameter for a circle, radius and length for an arc, else length
+- two circles: center distance, and the least and greatest distance between them
+- any other two: least distance; two lines, two planes, or a line and a plane add their distance when parallel, else their angle; two parallel cylinders add their axis distance
+- three or more: total length of edges or total area of faces
+- circles and planes are exact from the kernel; other least distances are over the display mesh, within its 0.05 mm deflection
+- a build's `meshes.json` carries each face's surface and each edge as a polyline, with a circle's exact parameters; seams and degenerate edges are left out
+- a rebuild or tab switch clears the picks
 
 ## agent sessions
 
@@ -190,3 +202,4 @@
 - 2026-11-10: keep each build on disk; drop `keepMb`
 - 2026-11-10: a part or assembly is an instance, and a `.cad.ts` file is one, replacing options; assemblies place files' instances and reuse their kept builds
 - 2026-11-11: show the parts list as the instance tree of sub-assemblies
+- 2026-11-12: click to measure faces and edges; pins move to draw mode

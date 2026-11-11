@@ -1,10 +1,12 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { measure } from "./measure.js";
 
 const $ = (id) => document.getElementById(id);
 const stage = $("stage"), viewport = $("viewport"), ink = $("ink"), input = $("input");
 const accent = new THREE.Color("#e8590c");
 const CLICK_SLOP = 4;
+const EDGE_PX = 6; // how near the pointer an edge must pass to be picked over a face
 const MAX_SHOT = 1400;
 
 // --- Scene ------------------------------------------------------------------
@@ -39,6 +41,8 @@ const ghostMaterial = new THREE.MeshStandardMaterial({ color: 0xb4b8bf, transpar
 const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x24262b });
 const hoverMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
 const pickedMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide });
+const hoverEdgeMaterial = new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.6 });
+const pickedEdgeMaterial = new THREE.LineBasicMaterial({ color: accent });
 const flashMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide });
 
 // --- State ------------------------------------------------------------------
@@ -56,6 +60,7 @@ let flashOverlays = [];
 let flashUntil = 0;
 const refs = []; // { n, part, face, point, overlay, el } | { n, stroke, faces }
 let nextRef = 1;
+const measured = []; // { key, part, face } | { key, part, edge }: what the person picked to measure
 let drawMode = false;
 let running = false;
 let hoverKey = "";
@@ -107,6 +112,8 @@ async function loadModel() {
   hoverOverlay = null;
   hoverKey = "";
   flashOverlays = [];
+  measured.length = 0; // edge indices do not survive a rebuild
+  renderMeasure();
 
   for (const m of data.meshes.parts) {
     const info = model.parts.find((p) => p.path === m.path);
@@ -114,7 +121,10 @@ async function loadModel() {
     const mesh = new THREE.Mesh(geometry, partMaterial);
     mesh.userData.path = m.path;
     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 28), edgeMaterial);
-    const part = { info, mesh, edges, geometry, groups: m.faceGroups, matrix: new THREE.Matrix4() };
+    const part = {
+      info, mesh, edges, geometry, groups: m.faceGroups, matrix: new THREE.Matrix4(),
+      faceGeom: m.faceGeom ?? [], edgeGeom: m.edges ?? [],
+    };
     bindPose(mesh, part.matrix);
     bindPose(edges, part.matrix);
     world.add(mesh, edges);
@@ -147,6 +157,7 @@ async function loadModel() {
 function showView(file) {
   loadToken++;
   cancelListening();
+  clearMeasure();
   selectedPart = hoveredPart = null;
   setPreview(null);
   dropOverlay(hoverOverlay);
@@ -466,15 +477,77 @@ function worldAt(e) {
 }
 
 
+/** The visible edge nearest the pointer, within EDGE_PX on screen. */
+function pickEdge(e) {
+  if (previewStep !== null) return null;
+  const r = stage.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), sa = new THREE.Vector3(), sb = new THREE.Vector3();
+  const near = [];
+  for (const [path, part] of parts) {
+    if (!part.mesh.visible) continue;
+    part.edgeGeom.forEach((edge, i) => {
+      let best = null;
+      for (let k = 3; k < edge.points.length; k += 3) {
+        a.fromArray(edge.points, k - 3).applyMatrix4(part.matrix);
+        b.fromArray(edge.points, k).applyMatrix4(part.matrix);
+        sa.copy(a).project(camera);
+        sb.copy(b).project(camera);
+        if (Math.abs(sa.z) > 1 || Math.abs(sb.z) > 1) continue;
+        const ax = ((sa.x + 1) / 2) * r.width, ay = ((1 - sa.y) / 2) * r.height;
+        const dx = ((sb.x + 1) / 2) * r.width - ax, dy = ((1 - sb.y) / 2) * r.height - ay;
+        const len2 = dx * dx + dy * dy;
+        const t = len2 ? THREE.MathUtils.clamp(((mx - ax) * dx + (my - ay) * dy) / len2, 0, 1) : 0;
+        const d = Math.hypot(ax + t * dx - mx, ay + t * dy - my);
+        if (d <= EDGE_PX && (!best || d < best.d)) best = { d, point: a.clone().lerp(b, t) };
+      }
+      if (best) near.push({ part: path, edge: i, ...best });
+    });
+  }
+  near.sort((x, y) => x.d - y.d);
+  // An edge behind the model is hidden: a face lies between it and the camera.
+  const meshes = [...parts.values()].filter((p) => p.mesh.visible).map((p) => p.mesh);
+  for (const c of near.slice(0, 8)) {
+    const dir = c.point.clone().sub(camera.position);
+    const dist = dir.length();
+    raycaster.set(camera.position, dir.normalize());
+    const first = raycaster.intersectObjects(meshes, false)[0];
+    if (!first || first.distance >= dist - (0.1 + dist * 1e-3)) return { part: c.part, edge: c.edge, point: c.point };
+  }
+  return null;
+}
+/** An edge near the pointer, else the face under it. */
+function pickAny(e) {
+  return pickEdge(e) ?? pick(e);
+}
+const keyOf = (hit) => (hit.edge !== undefined ? `${hit.part}|edge ${hit.edge}` : `${hit.part}|${hit.face.id ?? hit.face}`);
+function labelOf(hit) {
+  if (hit.edge === undefined) return `${hit.part}/${hit.face.id ?? hit.face}`;
+  return `${hit.part}/${parts.get(hit.part).edgeGeom[hit.edge].kind} edge`;
+}
+function edgeOverlay(path, i, material) {
+  const part = parts.get(path);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(part.edgeGeom[i].points, 3));
+  const line = new THREE.Line(g, material);
+  line.renderOrder = 3;
+  bindPose(line, part.matrix);
+  world.add(line);
+  return line;
+}
+function highlight(hit, faceMaterial, edgeMaterial) {
+  return hit.edge !== undefined ? edgeOverlay(hit.part, hit.edge, edgeMaterial) : overlayFor(hit.part, hit.face.id ?? hit.face, faceMaterial);
+}
+
 function hover(e) {
-  const hit = e ? pick(e) : null;
-  const key = hit ? `${hit.part}|${hit.face.id}` : "";
+  const hit = e ? (drawMode ? pick(e) : pickAny(e)) : null;
+  const key = hit ? keyOf(hit) : "";
   const tip = $("tip");
   if (key !== hoverKey) {
     hoverKey = key;
     dropOverlay(hoverOverlay);
-    hoverOverlay = hit ? overlayFor(hit.part, hit.face.id, hoverMaterial) : null;
-    if (hit) tip.textContent = `${hit.part}/${hit.face.id}`;
+    hoverOverlay = hit ? highlight(hit, hoverMaterial, hoverEdgeMaterial) : null;
+    if (hit) tip.textContent = labelOf(hit);
   }
   tip.hidden = !hit;
   if (hit) {
@@ -537,7 +610,75 @@ function renderRefs() {
   }));
 }
 
-// Pointer gestures: click pins a face, drag orbits, or draws in draw mode.
+// --- Measuring --------------------------------------------------------------
+/** A picked face or edge in world coordinates at the current pose, as measure.js takes it. */
+function entityOf(m) {
+  const part = parts.get(m.part);
+  const at = (v) => new THREE.Vector3(...v).applyMatrix4(part.matrix);
+  const along = (v) => new THREE.Vector3(...v).transformDirection(part.matrix);
+  if (m.edge !== undefined) {
+    const g = part.edgeGeom[m.edge];
+    const points = [];
+    for (let k = 0; k < g.points.length; k += 3) points.push(new THREE.Vector3().fromArray(g.points, k).applyMatrix4(part.matrix));
+    const out = { type: "edge", kind: g.kind, length: g.length, points };
+    if (g.kind === "circle") {
+      const axis = along(g.axis), x = along(g.x);
+      out.circle = { center: at(g.center), axis, x, y: axis.clone().cross(x), radius: g.radius, first: g.first, last: g.last };
+    }
+    return out;
+  }
+  const index = part.info.faces.findIndex((f) => f.id === m.face);
+  const g = part.faceGeom[index] ?? { kind: part.info.faces[index].surface };
+  const pos = part.geometry.getAttribute("position"), source = part.geometry.index.array;
+  const tris = [], v = new THREE.Vector3();
+  for (let i = 0; i < part.groups.length; i += 3) {
+    if (part.groups[i + 2] !== index) continue;
+    for (let t = part.groups[i] * 3, end = t + part.groups[i + 1] * 3; t < end; t++) {
+      tris.push(...v.fromBufferAttribute(pos, source[t]).applyMatrix4(part.matrix).toArray());
+    }
+  }
+  const out = { type: "face", kind: g.kind, area: part.info.faces[index].area, tris };
+  if (g.normal) out.plane = { origin: at(g.origin), normal: along(g.normal) };
+  if (g.axis) out.axis = { origin: at(g.origin), dir: along(g.axis), radius: g.radius };
+  return out;
+}
+/** Adds a picked face or edge to the measurement, or takes it out when picked again; empty space clears it. */
+function toggleMeasure(hit) {
+  if (!hit) return clearMeasure();
+  const key = keyOf(hit);
+  const i = measured.findIndex((m) => m.key === key);
+  if (i >= 0) dropOverlay(measured.splice(i, 1)[0].overlay);
+  else {
+    const m = hit.edge !== undefined ? { part: hit.part, edge: hit.edge } : { part: hit.part, face: hit.face.id };
+    measured.push({ ...m, key, overlay: highlight(hit, pickedMaterial, pickedEdgeMaterial) });
+  }
+  renderMeasure();
+}
+function clearMeasure() {
+  for (const m of measured) dropOverlay(m.overlay);
+  measured.length = 0;
+  renderMeasure();
+}
+function renderMeasure() {
+  const box = $("measure");
+  box.hidden = !measured.length;
+  if (!measured.length) return;
+  const head = document.createElement("div");
+  head.className = "head";
+  head.textContent = measured.length === 1 ? labelOf(measured[0]) : `${measured.length} selected`;
+  box.replaceChildren(head, ...measure(measured.map(entityOf)).map((r) => {
+    const row = document.createElement("div");
+    row.className = "measure-row";
+    const label = document.createElement("span");
+    label.textContent = r.label;
+    const value = document.createElement("b");
+    value.textContent = r.value;
+    row.append(label, value);
+    return row;
+  }));
+}
+
+// Pointer gestures: click measures, drag orbits; in draw mode, click pins a face and drag draws.
 let down = null;
 let stroke = null;
 const canvas = renderer.domElement;
@@ -568,13 +709,17 @@ stage.addEventListener("wheel", (e) => {
   controls._pan(-e.deltaX, -e.deltaY);
 }, { capture: true, passive: false });
 canvas.addEventListener("pointerup", (e) => {
-  if (stroke) return finishStroke();
   if (!down) return;
   const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
   down = null;
-  if (moved > CLICK_SLOP) return;
-  const hit = pick(e);
-  if (hit) addPin(hit);
+  if (stroke) {
+    if (moved > CLICK_SLOP) return finishStroke();
+    stroke = null;
+    const hit = pick(e);
+    if (hit) addPin(hit);
+    return;
+  }
+  if (moved <= CLICK_SLOP) toggleMeasure(pickAny(e));
 });
 function extendStroke(e) {
   const at = worldAt(e);
@@ -585,7 +730,6 @@ function extendStroke(e) {
 function finishStroke() {
   const s = stroke;
   stroke = null;
-  down = null;
   if (s.points.length < 2) return;
   const r = { n: nextRef++, stroke: s.points, faces: [...s.faces.values()].slice(0, 12), point: s.points[0] };
   refs.push(r);
@@ -595,6 +739,7 @@ function finishStroke() {
 function setDraw(on) {
   drawMode = on;
   controls.enabled = !on;
+  hover(null); // draw mode hovers faces only
   $("draw").setAttribute("aria-pressed", on);
   stage.classList.toggle("drawing", on);
 }
@@ -699,6 +844,7 @@ function applyPose() {
     const part = r.base && parts.get(r.part);
     if (part) r.point.copy(r.base).applyMatrix4(part.matrix);
   }
+  if (measured.length) renderMeasure();
 }
 /** The joints the person moved away from the source, for the agent. */
 function movedJoints() {
@@ -1320,6 +1466,7 @@ addEventListener("keydown", (e) => {
   else if (e.key === "f" || e.key === "F") fit();
   else if (e.key === "Escape") {
     clearRefs();
+    clearMeasure();
     input.value = "";
     updateSend();
     setDraw(false);
@@ -1371,7 +1518,7 @@ events.onmessage = (ev) => {
     if (faces.length) flashUntil = performance.now() + 4000;
   }
 };
-window.vibecad = { parts: () => parts, refs, camera, controls };
+window.vibecad = { parts: () => parts, refs, measured, camera, controls };
 dark.addEventListener("change", () => {
   edgeMaterial.color.set(dark.matches ? 0x0d0e10 : 0x24262b);
 });

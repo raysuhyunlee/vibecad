@@ -94,6 +94,30 @@ export interface MeshData {
   indices: Uint32Array;
   /** [triangleStart, triangleCount, faceIndex] triples. */
   faceGroups: number[];
+  /** Exact surface of each face, by face index, for measuring in the viewer. */
+  faceGeom?: FaceGeom[];
+  /** The solid's edges, for picking and measuring in the viewer. */
+  edges?: EdgeGeom[];
+}
+/** A plane has `origin` and `normal`; a cylinder, cone, sphere or torus has `origin` and `axis`, and a radius when it has one. */
+export interface FaceGeom {
+  kind: string;
+  origin?: Vec3;
+  normal?: Vec3;
+  axis?: Vec3;
+  radius?: number;
+}
+/** An edge as a polyline. A circle or arc is `center + radius * (cos u * x + sin u * (axis cross x))`, u from `first` to `last`. */
+export interface EdgeGeom {
+  kind: string;
+  length: number;
+  points: number[];
+  center?: Vec3;
+  axis?: Vec3;
+  x?: Vec3;
+  radius?: number;
+  first?: number;
+  last?: number;
 }
 /** A sub-assembly placed in the entry, at any depth; its parts' paths start with `path/`. */
 export interface PlaceResult {
@@ -936,7 +960,61 @@ function placeMesh(m: MeshData, mat: Mat, path: string): MeshData {
     for (let i = 0; i < src.length; i += 3) out.set(apply(mat, [src[i]!, src[i + 1]!, src[i + 2]!], w), i);
     return out;
   };
-  return { path, positions: move(m.positions, 1), normals: move(m.normals, 0), indices: m.indices, faceGroups: m.faceGroups };
+  const at = (v: Vec3 | undefined, w: number) => v && (apply(mat, v, w).map(round) as Vec3);
+  return {
+    path, positions: move(m.positions, 1), normals: move(m.normals, 0), indices: m.indices, faceGroups: m.faceGroups,
+    ...(m.faceGeom && {
+      faceGeom: m.faceGeom.map((f) => ({ ...f, origin: at(f.origin, 1), normal: at(f.normal, 0), axis: at(f.axis, 0) })),
+    }),
+    ...(m.edges && {
+      edges: m.edges.map((e) => ({
+        ...e,
+        points: [...move(new Float32Array(e.points), 1)].map(round),
+        center: at(e.center, 1), axis: at(e.axis, 0), x: at(e.x, 0),
+      })),
+    }),
+  };
+}
+
+const CIRCLE_STEP = Math.PI / 36; // polyline step along an arc, 5 degrees
+const CURVE_SAMPLES = 32; // polyline points along any other curve
+function faceGeomOf(k: OcctKernel, f: ShapeHandle): FaceGeom {
+  const s = k.surfaceData(f);
+  if (s.kind === "plane") return { kind: s.kind, origin: tuple(s.location), normal: tuple(s.normal) };
+  if (s.kind === "cylinder" || s.kind === "sphere") {
+    return { kind: s.kind, origin: tuple(s.location), axis: tuple(s.axis), radius: s.radius };
+  }
+  if (s.kind === "cone" || s.kind === "torus") return { kind: s.kind, origin: tuple(s.location), axis: tuple(s.axis) };
+  return { kind: s.kind };
+}
+/** Each edge once, skipping seams, which bound only one face, and degenerate edges; neither draws anything. */
+function edgesOf(k: OcctKernel, solid: ShapeHandle): EdgeGeom[] {
+  const facesOf = new Map<number, Set<number>>();
+  k.getSubShapes(solid, "face").forEach((f, i) => {
+    for (const e of k.getSubShapes(f, "edge")) {
+      const h = k.hashCode(e, HASH_BOUND);
+      facesOf.set(h, (facesOf.get(h) ?? new Set()).add(i));
+    }
+  });
+  const out: EdgeGeom[] = [];
+  const done = new Set<number>();
+  for (const e of k.getSubShapes(solid, "edge")) {
+    const h = k.hashCode(e, HASH_BOUND);
+    if (done.has(h) || (facesOf.get(h)?.size ?? 0) < 2) continue;
+    done.add(h);
+    const length = k.curveLength(e);
+    if (length < 1e-7) continue;
+    const c = k.curveData(e);
+    const n = c.kind === "line" ? 1 : c.kind === "circle" ? Math.max(2, Math.ceil((c.last - c.first) / CIRCLE_STEP)) : CURVE_SAMPLES;
+    const points: number[] = [];
+    for (let i = 0; i <= n; i++) points.push(...tuple(k.curvePointAtParam(e, c.first + ((c.last - c.first) * i) / n)).map(round));
+    const edge: EdgeGeom = { kind: c.kind, length: round(length), points };
+    if (c.kind === "circle") {
+      Object.assign(edge, { center: tuple(c.center), axis: tuple(c.axis), x: tuple(c.xDirection), radius: c.radius, first: c.first, last: c.last });
+    }
+    out.push(edge);
+  }
+  return out;
 }
 
 /** A part built in its own frame: all an assembly needs to place it without evaluating it again. */
@@ -999,7 +1077,11 @@ function evalPart(ev: Evaluator, inst: Instance, withSteps: boolean): PartBuild 
       path: "", type: inst.typeName, params: inst.params, src: inst.src,
       volume: round(k.getVolume(e.shape)), bbox: bboxOf(k, e.shape), faces, steps,
     },
-    mesh: toMesh(k, e.shape, "", (h) => faceIndex.get(h) ?? -1),
+    mesh: {
+      ...toMesh(k, e.shape, "", (h) => faceIndex.get(h) ?? -1),
+      faceGeom: ev.faces(e.shape).map((f) => faceGeomOf(k, f)),
+      edges: edgesOf(k, e.shape),
+    },
     ...(withSteps && { steps: stepMeshes }),
     shape: e.shape,
   };

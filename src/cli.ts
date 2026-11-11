@@ -202,6 +202,7 @@ function encodeMesh(m: MeshData) {
   return {
     path: m.path, faceGroups: m.faceGroups,
     positions: encode(m.positions), normals: encode(m.normals), indices: encode(m.indices),
+    faceGeom: m.faceGeom, edges: m.edges,
   };
 }
 function decodeMesh(m: EncodedMesh): MeshData {
@@ -212,6 +213,7 @@ function decodeMesh(m: EncodedMesh): MeshData {
   return {
     path: m.path, faceGroups: m.faceGroups,
     positions: new Float32Array(bytes(m.positions)), normals: new Float32Array(bytes(m.normals)), indices: new Uint32Array(bytes(m.indices)),
+    faceGeom: m.faceGeom, edges: m.edges,
   };
 }
 

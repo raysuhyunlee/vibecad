@@ -60,6 +60,7 @@
         <span id="empty-text" hidden></span>
       </div>
       <canvas id="gizmo" aria-label="View cube"></canvas>
+      <div id="measure" aria-live="polite" hidden></div>
       <div id="tools">
         <button id="draw" class="icon" aria-label="Draw (D)" aria-pressed="false" title="Draw (D)"><svg><use href="#i-pen"/></svg></button>
         <button id="fit" class="icon" aria-label="Fit view (F)" title="Fit view (F)"><svg><use href="#i-fit"/></svg></button>
@@ -75,7 +76,7 @@
       <form id="composer">
         <div id="refs"></div>
         <div id="queued" hidden></div>
-        <textarea id="input" rows="2" placeholder="Click the model, then describe the change" aria-label="Feedback"></textarea>
+        <textarea id="input" rows="2" placeholder="Pin the model with the pen (D), then describe the change" aria-label="Feedback"></textarea>
         <div id="actions">
           <button id="mic" type="button" class="icon" aria-label="Talk (hold Space)" title="Talk (hold Space)"><svg><use href="#i-mic"/></svg></button>
           <button id="send" type="submit" class="icon primary" aria-label="Send" title="Send"><svg><use href="#i-send"/></svg></button>
