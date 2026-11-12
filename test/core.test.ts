@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  assembly, box, check, circle, closedSpline, cylinder, edges, extrude, helix, importStep, loft, mate, minClearance, noCollision, offset, onFace, outerTangent, part, path,
-  plane, polygon, port, rect, revolute, revolve, roundedRect, slider, spine, sweep, world,
+  assembly, box, check, circle, closedSpline, cone, cylinder, edges, extrude, helix, importStep, loft, mate, minClearance, noCollision, offset, onFace, outerTangent, part, path,
+  plane, polygon, port, rect, revolute, revolve, roundedRect, slider, sphere, spine, sweep, world,
 } from "../src/index.ts";
 import { build, CadError, getKernel, type KeptFeature, type PartStore } from "../src/eval.ts";
 import type { Vec3 } from "../src/lang.ts";
@@ -232,6 +232,47 @@ test("a broken fillet from the kernel is rebuilt where a curved wall runs off a 
   assert.ok((await getKernel()).isValid([...out.shapes.values()][0]!));
   assert.ok(m.faces.some((f) => f.name === "f" && f.surface === "torus"));
   assert.ok(m.volume > (await facesOf(body)).volume);
+});
+
+const floorOf = (width: number) => box(40, width, 2).named("floor").translate(0, 0, -2);
+const wideFloor = floorOf(30);
+
+test("a fillet built along a cone or sphere matches the kernel's where it can build one too", async () => {
+  const k = await getKernel();
+  const cases = [
+    cone(5, 3, 10).named("c").union(wideFloor).fillet(1, edges.between("c.side", "floor.top")),
+    cone(10, 6, 10).named("c").fillet(1, edges.between("c.top", "c.side")),
+    sphere(5).named("c").translate(0, 0, 2).union(wideFloor).fillet(1, edges.between("c.side", "floor.top")),
+  ];
+  const kernel = k.filletWithHistory;
+  for (const solid of cases) {
+    const want = (await facesOf(solid)).volume;
+    k.filletWithHistory = () => { throw new Error("refused for the test"); };
+    try {
+      closeTo((await facesOf(solid)).volume, want, 1e-3);
+    } finally {
+      k.filletWithHistory = kernel;
+    }
+  }
+});
+
+test("a fillet on a cone runs off a narrow floor", async () => {
+  // The kernel refuses the widening cone, and fills the narrowing one the wrong way.
+  for (const [c, width, flush] of [[cone(3, 5, 10), 5, true], [cone(5, 3, 10), 4, false]] as const) {
+    const body = c.named("c").union(floorOf(width));
+    const out = await build(part("P", () => body.fillet(1, edges.between("c.side", "floor.top")).named("f"))());
+    const m = out.model.parts[0]!;
+    assert.ok((await getKernel()).isValid([...out.shapes.values()][0]!));
+    const added = m.volume - (await facesOf(body)).volume;
+    const ring = (await facesOf(c.named("c").union(wideFloor).fillet(1, edges.between("c.side", "floor.top")))).volume
+      - (await facesOf(c.named("c").union(wideFloor))).volume;
+    assert.ok(added > 0 && added < ring, `${added} of ${ring}`);
+    // In a corner no wider than square, the ends are cut where the floor ends.
+    if (!flush) continue;
+    const ends = m.faces.filter((f) => f.name === "f" && f.surface === "plane");
+    assert.equal(ends.length, 4);
+    for (const f of ends) closeTo(Math.abs(f.center[1]), width / 2);
+  }
 });
 
 const centerIs = (f: { center: Vec3 }, want: Vec3) => f.center.forEach((v, i) => closeTo(v, want[i]!));

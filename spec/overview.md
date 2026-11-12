@@ -79,9 +79,11 @@
 - caps are `top` and `bottom` on an extrude, `start` and `end` on a partial revolve, a sweep and a loft; these and `side` are reserved as segment names
 - `fillet` and `chamfer` follow the kernel: they carry on along edges tangent to the selection
 - when the kernel refuses a fillet or returns a broken solid, vibecad builds it directly: the fillet's section is swept along each edge, clipped to both faces' outlines, then added to a concave corner or removed from a convex one
-- this works for line and planar curved edges where each face is flat, or straight across the edge, such as an extruded wall meeting a plane square to it
+- where the section keeps its shape along the edge, it is exact; where it changes, or a face curves across the edge, as on a cone or sphere, the rolling ball is solved against both surfaces at stations along the edge and the sections are lofted
+- a kernel fillet that grows a solid whose edges are all convex, or shrinks one whose edges are all concave, counts as broken
 - each edge is built alone: only selected edges are filleted, with no carrying on along tangent edges, and a fillet stops flat at the end of its edge
-- a refused fillet stays an error when its section would change along the edge, a face curves across the edge, or the radius fits nowhere along the edge
+- in a corner wider than square, each half of the section is clipped to its own face only, so where a face ends, the other face's half stops at the end of the edge rather than flush with it
+- a refused fillet stays an error when the radius fits nowhere along the edge
 
 ## cli
 
@@ -174,7 +176,6 @@
 ## status
 
 - modeling priority, draft: constraint solver is next
-- wip: fillet runout where a face curves across the edge or the section changes along it, such as on a cone or sphere
 - wip: closed-loop linkages and more joint kinds (cylindrical, ball, planar)
 - wip: drawn strokes stay in place when a joint moves; pins follow their part
 - wip: sketch constraint solver, draft, drawings, sheet metal
@@ -207,3 +208,4 @@
 - 2026-11-11: show the parts list as the instance tree of sub-assemblies
 - 2026-11-12: click to measure faces and edges; pins move to draw mode
 - 2026-11-12: keep each feature's result, so a changed part rebuilds only what its change reaches
+- 2026-11-12: build refused fillets whose section changes along the edge, or whose face curves across it

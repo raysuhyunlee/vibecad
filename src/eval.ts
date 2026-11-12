@@ -165,7 +165,7 @@ export interface KeptFeature {
  * Kept features from another version are rebuilt. Bump this when a change to evaluation can change
  * any feature's solid or face names; the pinned kernel version counts on its own.
  */
-export const FEATURES_VERSION = `1/occt-wasm@${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies["occt-wasm"]}`;
+export const FEATURES_VERSION = `2/occt-wasm@${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies["occt-wasm"]}`;
 /** One part's feature results by key, so a changed part rebuilds only the features after the change. `put` gets every feature the build used, kept or new. */
 export interface FeatureStore {
   get(key: string): KeptFeature | undefined;
@@ -565,6 +565,12 @@ class Evaluator {
           ev = k.filletWithHistory(solid, es, a.radius, this.hashes(inputs), HASH_BOUND);
           // On some runouts the kernel returns a broken solid instead of refusing.
           if (!k.isValid(ev.result)) throw new Error("the kernel's fillet is not a valid solid");
+          // On others, such as a cone running off a narrow floor, it is valid but fills or cuts the wrong way.
+          const concave = es.map((e) => this.corner(solid, e)?.concave);
+          const grew = k.getVolume(ev.result) - k.getVolume(solid);
+          if ((concave.every((c) => c === true) && grew <= 0) || (concave.every((c) => c === false) && grew >= 0)) {
+            throw new Error("the kernel's fillet changes the volume the wrong way");
+          }
         } catch (e) {
           // OCCT cannot run a fillet out over a curved end. See runoutFillet.
           const made = this.runoutFillet(n, solid, es, a.radius, inputs);
@@ -607,7 +613,7 @@ class Evaluator {
     for (const edge of es) {
       const tool = this.runoutTool(solid, edge, r);
       if (!tool) return undefined;
-      tools[tool.concave ? "fill" : "remove"].push(tool.shape);
+      tools[tool.concave ? "fill" : "remove"].push(...tool.shapes);
     }
     let result: Evaluated = { shape: solid, tags: new Map(inputs.flatMap((i) => [...i.tags])) };
     for (const [op, list] of [[BooleanOp.Fuse, tools.fill], [BooleanOp.Cut, tools.remove]] as const) {
@@ -622,10 +628,10 @@ class Evaluator {
    * A section of the fillet swept along one edge. The section is exact only while it keeps its shape, so each face
    * must be flat, or straight across the edge everywhere, as a wall extruded square to the edge's plane is.
    */
-  runoutTool(solid: ShapeHandle, edge: ShapeHandle, r: number): { shape: ShapeHandle; concave: boolean } | undefined {
+  /** The two faces at an edge, and the way into each, square to the edge, at any point along it. */
+  corner(solid: ShapeHandle, edge: ShapeHandle) {
     const k = this.k;
-    const eps = 1e-3, onFace = 1e-5;
-    const point = (p: Vec3) => k.makeVertex(p[0], p[1], p[2]);
+    const eps = 1e-3;
     const h = this.hash(edge);
     const sides = this.faces(solid).filter((f) => k.getSubShapes(f, "edge").some((x) => this.hash(x) === h));
     if (sides.length !== 2) return undefined;
@@ -635,26 +641,42 @@ class Evaluator {
       const p = tuple(k.curvePointAtParam(edge, u)), dir = norm(tuple(k.curveTangent(edge, u)));
       return { p, dir, across: sides.map((f) => cross(dir, this.normalAt(f, p))) as [Vec3, Vec3] };
     };
-    const inner = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => station(i / 10));
-    const mid = inner[4]!;
+    const mid = station(0.5);
     // Which way across the edge each face lies. It holds along the edge, and ends can sit on a curved outline.
     const signs = sides.map((f, i) =>
-      k.distanceBetween(f, point(add(mid.p, scale(mid.across[i]!, eps)))) < eps / 1000 ? 1 : -1);
+      k.distanceBetween(f, k.makeVertex(...add(mid.p, scale(mid.across[i]!, eps)))) < eps / 1000 ? 1 : -1);
     const inward = (s: { across: [Vec3, Vec3] }, i: number) => scale(s.across[i]!, signs[i]!);
+    // In a concave corner the space between the faces is empty; in a convex one it is the solid.
+    const concave = !k.containsPoint(solid, vec(add(mid.p, scale(norm(add(inward(mid, 0), inward(mid, 1))), eps))));
+    return { sides, station, inward, concave };
+  }
+
+  runoutTool(solid: ShapeHandle, edge: ShapeHandle, r: number): { shapes: ShapeHandle[]; concave: boolean } | undefined {
+    const k = this.k;
+    const eps = 1e-3, onFace = 1e-5;
+    const point = (p: Vec3) => k.makeVertex(p[0], p[1], p[2]);
+    const at = this.corner(solid, edge);
+    if (!at) return undefined;
+    const { sides, station, inward } = at;
+    const inner = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => station(i / 10));
+    const mid = inner[4]!;
     const angleAt = (s: { across: [Vec3, Vec3] }) => Math.acos(Math.min(1, Math.max(-1, dot(inward(s, 0), inward(s, 1)))));
     const between = angleAt(mid);
     if (between < 1e-6 || Math.PI - between < 1e-6) return undefined;
+    const lofted = () => this.loftedTool(at, r);
+    // Clipping a whole section to both faces only works up to a square corner. See loftedTool.
+    if (between > Math.PI / 2 + 1e-9) return lofted();
     for (const s of inner) {
-      if (Math.abs(angleAt(s) - between) > 1e-6) return undefined;
+      if (Math.abs(angleAt(s) - between) > 1e-6) return lofted();
       for (let i = 0; i < 2; i++) {
         if (k.surfaceType(sides[i]!) === "plane") continue;
-        if (Math.hypot(...sub(inward(s, i), inward(mid, i))) > 1e-6) return undefined;
+        if (Math.hypot(...sub(inward(s, i), inward(mid, i))) > 1e-6) return lofted();
       }
     }
     const reach = r / Math.tan(between / 2);
     // Too big a radius fits nowhere, and a face curved across the edge is off the tangent point everywhere.
     const fits = inner.find((s) => sides.every((f, i) => k.distanceBetween(f, point(add(s.p, scale(inward(s, i), reach)))) < onFace));
-    if (!fits) return undefined;
+    if (!fits) return lofted();
     const bisector = norm(add(inward(fits, 0), inward(fits, 1)));
     // In a concave corner the space between the faces is empty; in a convex one it is the solid.
     const concave = !k.containsPoint(solid, vec(add(fits.p, scale(bisector, eps))));
@@ -678,7 +700,90 @@ class Evaluator {
       const footprint = k.surfaceType(f) === "plane" ? k.extrude(f, ...scale(normal, size)) : k.thicken(f, size, 1e-3);
       shape = k.common(shape, footprint);
     });
-    return this.faces(shape).length === 0 ? undefined : { shape, concave };
+    return this.faces(shape).length === 0 ? undefined : { shapes: [shape], concave };
+  }
+
+  /**
+   * A fillet whose section changes along the edge, or whose face curves across it, as on a cone or a sphere.
+   * The rolling ball is solved against both surfaces at stations along the edge, and its sections are lofted.
+   * Each section reaches past both faces, so clipping to them gives the faces' true shape.
+   */
+  loftedTool(at: NonNullable<ReturnType<Evaluator["corner"]>>, r: number): { shapes: ShapeHandle[]; concave: boolean } | undefined {
+    const k = this.k;
+    const STATIONS = 24; // sections along the edge; enough that the loft between them stays within tolerance
+    const onFace = 1e-5;
+    const { sides, station, inward, concave } = at;
+    const mid = station(0.5);
+    // The ball sits outside the solid in a concave corner, and inside it in a convex one.
+    const side = concave ? 1 : -1;
+    const onSurface = (f: ShapeHandle, x: Vec3) => {
+      const { u, v } = k.uvFromPoint(f, vec(x));
+      return { q: tuple(k.pointOnSurface(f, u, v)), n: norm(tuple(k.surfaceNormal(f, u, v))) };
+    };
+    const ends = [station(0).p, station(1).p] as const;
+    const closed = Math.hypot(...sub(ends[0], ends[1])) < 1e-7;
+    const solved: Array<{ s: ReturnType<typeof station>; c: Vec3; qa: Vec3; qb: Vec3 }> = [];
+    let fits = false, size = 0;
+    const wide: boolean[] = [];
+    for (let j = 0; j <= STATIONS; j++) {
+      const s = station(j / STATIONS);
+      const [a, b] = [inward(s, 0), inward(s, 1)];
+      const angle = Math.acos(Math.min(1, Math.max(-1, dot(a, b))));
+      if (angle < 1e-6 || Math.PI - angle < 1e-6) return undefined;
+      wide.push(angle > Math.PI / 2 + 1e-9);
+      // Newton in the plane square to the edge, until the center is r from both surfaces.
+      const e1 = norm(a), e2 = norm(cross(s.dir, e1));
+      let c = add(s.p, scale(norm(add(a, b)), r / Math.sin(angle / 2)));
+      let contacts = sides.map((f) => onSurface(f, c));
+      for (let it = 0; it < 50; it++) {
+        const g = contacts.map(({ q, n }) => dot(n, sub(c, q)) - side * r);
+        if (Math.max(...g.map(Math.abs)) < 1e-9) break;
+        const [n0, n1] = [contacts[0]!.n, contacts[1]!.n];
+        const [a0, b0, a1, b1] = [dot(n0, e1), dot(n0, e2), dot(n1, e1), dot(n1, e2)];
+        const det = a0 * b1 - a1 * b0;
+        if (Math.abs(det) < 1e-9) return undefined;
+        c = add(c, add(scale(e1, (-g[0]! * b1 + g[1]! * b0) / det), scale(e2, (-g[1]! * a0 + g[0]! * a1) / det)));
+        contacts = sides.map((f) => onSurface(f, c));
+      }
+      if (contacts.some(({ q, n }) => Math.abs(dot(n, sub(c, q)) - side * r) > 1e-6)) return undefined;
+      // Each contact lies on its own face's side of the edge.
+      if (contacts.some(({ q }, i) => dot(sub(q, s.p), inward(s, i)) <= 0)) return undefined;
+      fits ||= contacts.every(({ q }, i) => k.distanceBetween(sides[i]!, k.makeVertex(...q)) < onFace);
+      size = Math.max(size, Math.hypot(...sub(c, s.p)) + r);
+      const [qa, qb] = contacts.map((x) => x.q) as [Vec3, Vec3];
+      solved.push({ s, c, qa, qb });
+    }
+    // Too big a radius fits nowhere.
+    if (!fits) return undefined;
+    const line = (x: Vec3, y: Vec3) => k.makeLineEdge(vec(x), vec(y));
+    // A loft cannot close on itself, so a closed edge is lofted in two halves.
+    const half = STATIONS / 2;
+    const lofted = (wires: ShapeHandle[]) => closed
+      ? k.fuse(k.loft(wires.slice(0, half + 1), true, false), k.loft(wires.slice(half), true, false))
+      : k.loft(wires, true, false);
+    const footprints = sides.map((f) => {
+      const normal = this.normalAt(f, mid.p);
+      return k.surfaceType(f) === "plane" ? k.extrude(f, ...scale(normal, side * size)) : k.thicken(f, side * size, 1e-3);
+    });
+    const past = (c: Vec3, x: Vec3) => add(x, scale(norm(sub(x, c)), r));
+    const arc = (c: Vec3, a: Vec3, b: Vec3) => k.makeArcEdge(vec(a), vec(add(c, scale(norm(add(sub(a, c), sub(b, c))), r))), vec(b));
+    const clip = (piece: ShapeHandle, by: ShapeHandle[]) => by.reduce((s, f) => k.common(s, f), piece);
+    let shapes: ShapeHandle[];
+    if (wide.every((w) => !w)) {
+      shapes = [clip(lofted(solved.map(({ s, c, qa, qb }) => k.makeWire([
+        arc(c, qa, qb), line(qb, past(c, qb)), line(past(c, qb), past(c, s.p)), line(past(c, s.p), past(c, qa)), line(past(c, qa), qa),
+      ]))), footprints)];
+    } else {
+      // A footprint's wall at the edge runs along its face's normal, so in a corner wider than square it cuts into
+      // the fillet. There the section is split on the line from the edge to the ball's center, and each half,
+      // within a right angle of its own face, is clipped to that face alone.
+      shapes = sides.map((_, i) => clip(lofted(solved.map(({ s, c, qa, qb }) => {
+        const q = i === 0 ? qa : qb, split = add(c, scale(norm(sub(s.p, c)), r));
+        return k.makeWire([arc(c, q, split), line(split, past(c, s.p)), line(past(c, s.p), past(c, q)), line(past(c, q), q)]);
+      })), [footprints[i]!]));
+    }
+    shapes = shapes.filter((s) => this.faces(s).length > 0);
+    return shapes.length === 0 ? undefined : { shapes, concave };
   }
 
   /** One edge per profile segment, in order. */
