@@ -1367,7 +1367,28 @@ function openPicker() {
   $("picker").showModal();
   browse();
 }
-$("open-project").onclick = $("open-first").onclick = openPicker;
+// The OS's own folder dialog; the in-app picker stands in where there is none.
+let picking = false;
+async function openProject() {
+  if (picking) return;
+  picking = true;
+  try {
+    const res = await post("/project/pick", {});
+    if (res.status === 501) return openPicker();
+    const d = await res.json();
+    if (!d.path) return;
+    const opened = await post("/project", { path: d.path });
+    if (opened.ok) return;
+    // Say why in the in-app picker, already at that folder.
+    const { error } = await opened.json();
+    $("picker").showModal();
+    await browse(d.path);
+    pickerError(error);
+  } finally {
+    picking = false;
+  }
+}
+$("open-project").onclick = $("open-first").onclick = openProject;
 $("picker-close").onclick = () => $("picker").close();
 $("picker").addEventListener("click", (e) => {
   if (e.target === $("picker")) $("picker").close();

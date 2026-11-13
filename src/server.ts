@@ -128,6 +128,40 @@ function inside(root: string, child: string) {
 const hiddenName = (name: string) => name.startsWith(".") || name === "node_modules";
 const expandHome = (path: string) => path.replace(/^~(?=$|[\\/])/, homedir());
 
+/** The OS's own folder dialog, tried in order; the first that exists runs. */
+function folderDialogs(start: string): string[][] {
+  if (process.platform === "darwin") {
+    return [["osascript", "-e", "on run argv", "-e", "activate", "-e",
+      'POSIX path of (choose folder with prompt "Open project" default location (POSIX file (item 1 of argv)))',
+      "-e", "end run", start]];
+  }
+  if (process.platform === "win32") {
+    return [["powershell", "-NoProfile", "-STA", "-Command",
+      "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; " +
+      "$d.SelectedPath = $env:VIBECAD_START; $d.UseDescriptionForTitle = $true; $d.Description = 'Open project'; " +
+      "if ($d.ShowDialog((New-Object System.Windows.Forms.Form -Property @{TopMost = $true})) -eq 'OK') { $d.SelectedPath }"]];
+  }
+  return [
+    ["zenity", "--file-selection", "--directory", "--title=Open project", `--filename=${join(start, "")}`],
+    ["kdialog", "--getexistingdirectory", start, "--title", "Open project"],
+  ];
+}
+
+/** Asks the person for a folder. `null` is a cancel; `undefined` means this OS has no dialog to show. */
+async function pickFolder(start: string): Promise<string | null | undefined> {
+  for (const [cmd, ...args] of folderDialogs(start)) {
+    const out = await new Promise<string | null | undefined>((done) => {
+      let text = "";
+      const child = spawn(cmd!, args, { env: { ...process.env, VIBECAD_START: start }, stdio: ["ignore", "pipe", "ignore"] });
+      child.stdout.on("data", (d) => (text += d));
+      child.on("error", () => done(undefined));
+      child.on("close", (code) => done(code === 0 && text.trim() ? text.trim() : null));
+    });
+    if (out !== undefined) return out;
+  }
+  return undefined;
+}
+
 /** The project's modeling files, breadth first, relative to the working directory. */
 function listFiles() {
   const files: string[] = [];
@@ -542,6 +576,10 @@ export async function serve(o: {
       }
 
       if (req.method !== "POST") return json(res, { error: "Method not allowed" }, 405);
+      if (path === "/project/pick") {
+        const picked = await pickFolder(root ? dirname(root) : homedir());
+        return picked === undefined ? json(res, { error: "No folder dialog on this system" }, 501) : json(res, { path: picked });
+      }
       if (path === "/project") {
         const b = JSON.parse(await readBody(req));
         if (agent.running) return json(res, { error: "Stop the agent before opening another project." }, 409);

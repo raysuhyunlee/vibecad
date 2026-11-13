@@ -126,7 +126,7 @@
 ## app and projects
 
 - `vibecad dev` starts the app with nothing open; it takes no file
-- the person opens a project root with an in-app folder picker, served by the local server so it works on every OS
+- the person opens a project root with the OS's own folder dialog, shown by the local server (Finder, Explorer, or zenity or kdialog); where there is none, or the folder cannot be opened, an in-app folder picker stands in
 - opening a project runs its TypeScript in a build process, so only the person's own action opens one
 - one app serves one project: the server's working directory is the root, and builds, agents and `.vibecad/` resolve against it
 - the left panel lists the root's `*.cad.ts` and STEP files, skipping dot folders and `node_modules`, and updates as files change
