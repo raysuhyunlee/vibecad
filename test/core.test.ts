@@ -256,6 +256,22 @@ test("a fillet built along a cone or sphere matches the kernel's where it can bu
   }
 });
 
+test("a refused fillet whose edges meet at a corner stays an error", async () => {
+  const k = await getKernel();
+  const solid = box(20, 20, 20).named("b").fillet(2, edges.of("b.top"));
+  const kernel = k.filletWithHistory;
+  k.filletWithHistory = () => { throw new Error("refused for the test"); };
+  try {
+    await assert.rejects(build(part("F", () => solid)()), (e: CadError) => {
+      assert.equal(e.code, "OP_FAILED");
+      assert.match(e.message, /meet at a corner/);
+      return true;
+    });
+  } finally {
+    k.filletWithHistory = kernel;
+  }
+});
+
 test("a fillet on a cone runs off a narrow floor", async () => {
   // The kernel refuses the widening cone, and fills the narrowing one the wrong way.
   for (const [c, width, flush] of [[cone(3, 5, 10), 5, true], [cone(5, 3, 10), 4, false]] as const) {

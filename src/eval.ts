@@ -572,6 +572,11 @@ class Evaluator {
             throw new Error("the kernel's fillet changes the volume the wrong way");
           }
         } catch (e) {
+          // Edges built alone leave a gap where they meet at a corner, so a corner stays the kernel's error.
+          if (this.meetAtCorner(es)) {
+            const msg = e instanceof Error ? e.message : String(e);
+            throw new Error(`${msg}; the selected edges meet at a corner, which vibecad cannot build directly`);
+          }
           // OCCT cannot run a fillet out over a curved end. See runoutFillet.
           const made = this.runoutFillet(n, solid, es, a.radius, inputs);
           if (!made) throw e;
@@ -600,6 +605,19 @@ class Evaluator {
         return this.track(n, ev.result, ev, inputs);
       }
     }
+  }
+
+  /** Whether two of the edges share an end where they are not tangent. */
+  meetAtCorner(es: ShapeHandle[]) {
+    const k = this.k;
+    const ends = es.map((e) => {
+      const { first, last } = k.curveParameters(e);
+      return [first, last].map((u) => ({ p: tuple(k.curvePointAtParam(e, u)), t: norm(tuple(k.curveTangent(e, u))) }));
+    });
+    return ends.some((a, i) => ends.slice(i + 1).some((b) => a.some((x) => b.some((y) => {
+      const d = sub(x.p, y.p);
+      return dot(d, d) < 1e-8 && Math.abs(dot(x.t, y.t)) < 1 - 1e-6;
+    }))));
   }
 
   /**
@@ -877,7 +895,7 @@ function matches(faceName: string, sel: string) {
 
 function hintFor(n: Solid) {
   if (n.op === "fillet" || n.op === "chamfer") {
-    return "The radius may be too large for the adjacent faces, or the selection ends mid-edge.";
+    return "The radius may be too large for the adjacent faces or for a corner where selected edges meet. Try a smaller radius.";
   }
   if (n.op === "cut" || n.op === "intersect") return "The tools may not overlap the body.";
   if (n.op === "importStep") return "Check that the file is a valid STEP file with solid geometry.";

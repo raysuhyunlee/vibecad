@@ -93,7 +93,7 @@
 - a kernel fillet that grows a solid whose edges are all convex, or shrinks one whose edges are all concave, counts as broken
 - each edge is built alone: only selected edges are filleted, with no carrying on along tangent edges, and a fillet stops flat at the end of its edge
 - in a corner wider than square, each half of the section is clipped to its own face only, so where a face ends, the other face's half stops at the end of the edge rather than flush with it
-- a refused fillet stays an error when the radius fits nowhere along the edge
+- a refused fillet stays an error when the radius fits nowhere along the edge, or when two selected edges meet at a corner, since edges built alone leave the corner unblended
 
 ## cli
 
