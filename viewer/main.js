@@ -1,5 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { Line2 } from "three/addons/lines/Line2.js";
+import { LineGeometry } from "three/addons/lines/LineGeometry.js";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { measure } from "./measure.js";
 import { ARROW, layoutDims } from "./dims.js";
 
@@ -42,8 +45,10 @@ const ghostMaterial = new THREE.MeshStandardMaterial({ color: 0xb4b8bf, transpar
 const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x24262b });
 const hoverMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
 const pickedMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide });
-const hoverEdgeMaterial = new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.6 });
-const pickedEdgeMaterial = new THREE.LineBasicMaterial({ color: accent });
+// WebGL draws plain lines 1px wide, so highlighted edges use screen-space fat lines.
+const EDGE_HIGHLIGHT_PX = 3.5;
+const hoverEdgeMaterial = new LineMaterial({ color: accent, linewidth: EDGE_HIGHLIGHT_PX, transparent: true, opacity: 0.6 });
+const pickedEdgeMaterial = new LineMaterial({ color: accent, linewidth: EDGE_HIGHLIGHT_PX });
 const flashMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide });
 
 // --- State ------------------------------------------------------------------
@@ -532,9 +537,9 @@ function labelOf(hit) {
 }
 function edgeOverlay(path, i, material) {
   const part = parts.get(path);
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.Float32BufferAttribute(part.edgeGeom[i].points, 3));
-  const line = new THREE.Line(g, material);
+  const g = new LineGeometry();
+  g.setPositions(part.edgeGeom[i].points);
+  const line = new Line2(g, material);
   line.renderOrder = 3;
   bindPose(line, part.matrix);
   world.add(line);
