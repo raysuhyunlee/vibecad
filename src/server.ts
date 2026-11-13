@@ -31,6 +31,7 @@ const MIME: Record<string, string> = {
 /** An open file. Its build lives on disk; only the tab on screen holds it in memory. */
 interface Tab {
   version: number; // 0 while the tab has no fresh build
+  empty?: boolean; // the file has no code yet, so it is not built
   model?: Model;
   meshes?: string;
   error?: unknown;
@@ -43,10 +44,79 @@ interface Ref {
 }
 interface Feedback {
   text: string;
-  entry: string;
+  entry?: string;
   refs: string[];
   pose?: string;
   screenshot?: string;
+  photo?: string; // the reference image's block of the prompt
+}
+
+// --- Reference images: a photo or sketch with dimensions drawn over it ---------
+const PHOTOS = "refs";
+const PHOTO_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const DIM_KINDS = ["length", "diameter", "radius", "angle"] as const;
+interface Dim {
+  id: string;
+  label: string;
+  kind?: (typeof DIM_KINDS)[number]; // length when absent
+  a: number[];
+  b: number[];
+  c?: number[]; // an angle's vertex
+  value: number | null; // null: the agent asks for it
+}
+interface Photo {
+  image: string;
+  size: number[];
+  entry?: string;
+  dims: Dim[];
+}
+const photoJson = (name: string) => `${PHOTOS}/${name}.json`;
+/** Each image with the file it belongs to. */
+const listPhotos = () => {
+  try {
+    const names = readdirSync(PHOTOS).filter((f) => f.endsWith(".json") && PHOTO_NAME.test(f.slice(0, -5))).map((f) => f.slice(0, -5)).sort();
+    return names.map((name) => ({ name, entry: readPhoto(name)?.entry }));
+  } catch {
+    return [];
+  }
+};
+const readPhoto = (name: unknown): Photo | undefined => {
+  if (typeof name !== "string" || !PHOTO_NAME.test(name)) return undefined;
+  try {
+    const p = JSON.parse(readFileSync(photoJson(name), "utf8"));
+    return { ...p, dims: Array.isArray(p.dims) ? p.dims : [] };
+  } catch {
+    return undefined;
+  }
+};
+const point = (v: unknown) => (Array.isArray(v) && v.length === 2 && v.every(Number.isFinite) ? v.map(Number) : undefined);
+/** The person's dims as sent by the viewer, keeping only well-formed ones. */
+function cleanDims(list: unknown): Dim[] {
+  const out: Dim[] = [];
+  for (const d of Array.isArray(list) ? list : []) {
+    const a = point(d?.a), b = point(d?.b), c = point(d?.c);
+    const kind = DIM_KINDS.find((k) => k === d?.kind) ?? "length";
+    if (!a || !b || typeof d.id !== "string" || (kind === "angle" && !c)) continue;
+    const value = Number.isFinite(d.value) && d.value >= 0 ? Number(d.value) : null;
+    out.push({ id: d.id.slice(0, 40), label: String(d.label ?? "").slice(0, 80), kind, a, b, ...(kind === "angle" && { c }), value });
+  }
+  return out;
+}
+/** What the agent needs to model the image and ask for dimensions, every turn it is open. */
+function photoPrompt(name: string, p: Photo) {
+  const n = (v: number[]) => `[${v.map(Math.round).join(",")}]`;
+  const dims = p.dims.map((d) => {
+    const at = d.kind === "angle" && d.c ? `c=${n(d.c)} a=${n(d.a)} b=${n(d.b)}` : `${n(d.a)}-${n(d.b)}`;
+    const value = d.value === null ? "asked" : `= ${d.value} ${d.kind === "angle" ? "deg" : "mm"}`;
+    return `  ${d.id} ${d.kind ?? "length"} "${d.label}" ${at} ${value}`;
+  });
+  return [
+    `Reference image: ${PHOTOS}/${p.image} (${p.size[0]}x${p.size[1]} px), a photo of a real object or a hand sketch. Its dimensions are in ${photoJson(name)}.`,
+    `- Look at the image. Model the object in ${p.entry ?? "a new .cad.ts file, and set \"entry\" in the json to its project path"}, every dimension a named param; mark params you guessed \`// estimated\`.`,
+    `- Ask for the dimensions you still need by adding dims { id, label, kind, a, b, value: null }. kind is "length" (a to b), "diameter" (a and b across the circle, through its center), "radius" (a the center, b on the circle) or "angle" (c the vertex, a and b on each ray). Points are in image pixels from the top left, on the edges the dimension spans; label is a few words. Ask the few that most change the shape first; ask more in later turns.`,
+    `- A dim with a number is the person's, in mm or degrees for an angle: measured on the object or meant on a sketch. It wins over the image. Never change or remove it. Remove your asked dims you no longer need.`,
+    dims.length ? `- Dims now:\n${dims.join("\n")}` : `- No dims yet.`,
+  ].join("\n");
 }
 
 /** True when `child` is inside `root`, so a request cannot read outside it. */
@@ -115,14 +185,14 @@ export async function serve(o: {
     const tab = entry ? tabs.get(entry) : undefined;
     return {
       entry,
-      tabs: [...tabs].map(([file, t]) => ({ file, version: t.version, failed: !!t.error })),
+      tabs: [...tabs].map(([file, t]) => ({ file, version: t.version, failed: !!t.error, empty: !!t.empty })),
       built: !!tab?.model,
       building: buildingFile,
       buildError: tab?.error,
     };
   };
   const hello = () => ({
-    type: "hello", root, name: root && basename(root), ...project, ...entryState(),
+    type: "hello", root, name: root && basename(root), ...project, ...entryState(), photos: root ? listPhotos() : [],
     log, running: agent.running, queued: queue.length, agent: o.agent,
   });
 
@@ -155,6 +225,20 @@ export async function serve(o: {
     const file = entry;
     if (!file) return;
     building?.kill();
+    building = buildingFile = undefined;
+    const tab = tabs.get(file);
+    let blank = false;
+    try {
+      blank = !STEP_FILE.test(file) && !readFileSync(file, "utf8").trim();
+    } catch {
+      // A missing file fails in the build, with its own error.
+    }
+    if (tab) tab.empty = blank;
+    if (blank) {
+      Object.assign(tab!, { model: undefined, meshes: undefined, error: undefined, version: 0 });
+      emit({ type: "entry", ...entryState() });
+      return;
+    }
     const args = [CLI, "build", file, "--steps"];
     const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "ignore"] });
     building = child;
@@ -237,6 +321,16 @@ export async function serve(o: {
     return relative(root, target).replaceAll(sep, "/");
   };
   const projectEntry = (file: unknown) => projectFile(file, isEntry);
+  let photosTimer: NodeJS.Timeout | undefined;
+  const changedPhotos = new Set<string>();
+  const schedulePhotos = (name: string) => {
+    changedPhotos.add(name);
+    clearTimeout(photosTimer);
+    photosTimer = setTimeout(() => {
+      emit({ type: "photos", photos: listPhotos(), changed: [...changedPhotos] });
+      changedPhotos.clear();
+    }, 150);
+  };
   let filesTimer: NodeJS.Timeout | undefined;
   const scheduleFiles = () => {
     clearTimeout(filesTimer);
@@ -267,6 +361,8 @@ export async function serve(o: {
     watcher?.close();
     watcher = watch(".", { recursive: true }, (_event, file) => {
       if (!file || file.split(/[\\/]/).some(hiddenName)) return;
+      const photo = /^refs[\\/]([^\\/]+)\.json$/.exec(file);
+      if (photo) schedulePhotos(photo[1]!);
       const source = file.endsWith(".ts") || STEP_FILE.test(file);
       if (source) scheduleBuild();
       if (source || !extname(file)) scheduleFiles();
@@ -298,7 +394,8 @@ export async function serve(o: {
         `to point at geometry when you ask the person something. Commands that build take \`--pose joint=value,...\`. Reply in the person's language, briefly.\n\n`
       : "";
     const body = batch.map((f) => {
-      const lines = [`Viewing: ${f.entry}`, `Person said: ${JSON.stringify(f.text)}`];
+      const lines = [`Viewing: ${f.entry ?? "no file yet"}`, `Person said: ${JSON.stringify(f.text)}`];
+      if (f.photo) lines.push(f.photo);
       if (f.pose) lines.push(`They moved joints in the viewer, without changing the source. Points and the screenshot use this pose: --pose ${f.pose}`);
       if (f.refs.length) lines.push("They pointed at (tokens like [1] in the text refer to these):", ...f.refs);
       if (f.screenshot) lines.push(`Screenshot of what they see: ${f.screenshot}`);
@@ -380,6 +477,17 @@ export async function serve(o: {
           if (!target) return json(res, { error: "Not found" }, 404);
           return json(res, { lines: readFileSync(target, "utf8").split("\n") });
         }
+        if (path === "/photo") {
+          const p = readPhoto(url.searchParams.get("name"));
+          return p ? json(res, p) : json(res, { error: "Not found" }, 404);
+        }
+        if (path === "/photo/image") {
+          const p = readPhoto(url.searchParams.get("name"));
+          const target = p && resolve(PHOTOS, String(p.image));
+          if (!target || !inside(resolve(PHOTOS), target) || !existsSync(target)) return json(res, { error: "Not found" }, 404);
+          res.writeHead(200, { "content-type": /\.png$/i.test(target) ? "image/png" : "image/jpeg", "cache-control": "no-store" });
+          return res.end(readFileSync(target));
+        }
         if (path === "/dirs") {
           const asked = url.searchParams.get("path");
           const target = resolve(asked ? expandHome(asked) : root ? dirname(root) : homedir());
@@ -429,18 +537,57 @@ export async function serve(o: {
         closeTab(String(JSON.parse(await readBody(req)).file));
         return json(res, { ok: true });
       }
-      if (path === "/feedback") {
-        if (!entry) return json(res, { error: "Open a file first" }, 409);
+      if (path === "/file/new") {
+        if (!root) return json(res, { error: "Open a project first" }, 409);
+        let name = String(JSON.parse(await readBody(req)).path ?? "").trim().replaceAll("\\", "/").replace(/^\/+/, "");
+        if (!name.endsWith(ENTRY_SUFFIX)) name = name.replace(/\.ts$/, "") + ENTRY_SUFFIX;
+        const target = resolve(name);
+        if (name === ENTRY_SUFFIX || name.split("/").some((s) => !s || s === ".." || hiddenName(s)) || !inside(root, target)) {
+          return json(res, { error: "Use a name like bracket or parts/bracket" }, 400);
+        }
+        if (existsSync(target)) return json(res, { error: `${name} already exists` }, 409);
+        ensureDir(dirname(target));
+        writeFileSync(target, "");
+        setEntry(name);
+        return json(res, { file: name });
+      }
+      if (path === "/photo") {
+        if (!root) return json(res, { error: "Open a project first" }, 409);
+        if (!entry) return json(res, { error: "Open or create a file first" }, 409);
         const b = JSON.parse(await readBody(req));
+        const size = point(b.size);
+        if (typeof b.image !== "string" || !b.image.startsWith("data:image/jpeg;base64,") || !size) {
+          return json(res, { error: "The image must be a JPEG with its size" }, 400);
+        }
+        const base = String(b.name ?? "").toLowerCase().replace(/\.[^.]*$/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "photo";
+        let name = base;
+        for (let i = 2; existsSync(photoJson(name)); i++) name = `${base}-${i}`;
+        ensureDir(PHOTOS);
+        writeFileSync(`${PHOTOS}/${name}.jpg`, Buffer.from(b.image.slice(23), "base64"));
+        writeFileSync(photoJson(name), JSON.stringify({ image: `${name}.jpg`, size, entry, dims: [] } satisfies Photo, null, 2) + "\n");
+        return json(res, { name });
+      }
+      if (path === "/feedback") {
+        const b = JSON.parse(await readBody(req));
+        const photoName = typeof b.photo?.name === "string" ? b.photo.name : undefined;
+        let photo = photoName ? readPhoto(photoName) : undefined;
+        if (photoName && !photo) return json(res, { error: "That image is no longer in the project." }, 400);
+        if (!entry && !photo) return json(res, { error: "Open a file first" }, 409);
         const text = String(b.text ?? "").trim();
-        if (!text) return json(res, { error: "Feedback needs text" }, 400);
+        if (!text && !photo) return json(res, { error: "Feedback needs text" }, 400);
+        if (photo && Array.isArray(b.photo.dims)) {
+          photo = { ...photo, dims: cleanDims(b.photo.dims) };
+          writeFileSync(photoJson(photoName!), JSON.stringify(photo, null, 2) + "\n");
+        }
         const refs: Ref[] = (Array.isArray(b.refs) ? b.refs : []).map((r: any) => ({
           n: Number(r.n), part: String(r.part), face: String(r.face),
           ...(Array.isArray(r.point) && { point: r.point.map(Number) }),
         }));
         const id = ++feedbackId;
         // Described now: the model may be a different file by the time the turn starts.
-        const feedback: Feedback = { text, entry, refs: refs.map(describeRef) };
+        const feedback: Feedback = { text, refs: entry ? refs.map(describeRef) : [] };
+        if (entry) feedback.entry = entry;
+        if (photo) feedback.photo = photoPrompt(photoName!, photo);
         const pose = Object.entries(b.pose ?? {}).filter(([, v]) => Number.isFinite(v)).map(([j, v]) => `${j}=${v}`);
         if (pose.length) feedback.pose = pose.join(",");
         if (typeof b.screenshot === "string" && b.screenshot.startsWith("data:image/png;base64,")) {
@@ -449,7 +596,7 @@ export async function serve(o: {
           writeFileSync(feedback.screenshot, Buffer.from(b.screenshot.slice(22), "base64"));
         }
         queue.push(feedback);
-        say({ role: "user", kind: "text", text, refs: refs.length });
+        say({ role: "user", kind: "text", text: text || (photo!.dims.length ? `Dimensions on ${photoName}` : `Model from ${photoName}`), refs: refs.length });
         status();
         void flush();
         return json(res, { ok: true });

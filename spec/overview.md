@@ -131,6 +131,8 @@
 - one app serves one project: the server's working directory is the root, and builds, agents and `.vibecad/` resolve against it
 - the left panel lists the root's `*.cad.ts` and STEP files, skipping dot folders and `node_modules`, and updates as files change
 - selecting a file opens it in a tab; a project opens on `main.cad.ts` when it has one
+- the new-file button takes a name or `folder/name`, creates an empty `.cad.ts` and opens it; a name that exists, leaves the root, or goes through a dot folder is refused
+- an empty file is not built: its view offers to add a photo or sketch, or to describe the part in the chat
 - a tab shows a fresh kept build without a rebuild, so a file reopened after a restart renders at once
 - a tab shown with an out-of-date build does not show it: it builds as if for the first time
 - only the tab on screen holds its build in memory; the others read theirs from disk when shown
@@ -163,6 +165,31 @@
 - the parts list is the instance tree: a placed sub-assembly is a row, named by its place and type, that folds its parts, folded at first; hovering it tints all of them
 - a feature-history list replays any part step by step, next to its source
 
+## reference images
+
+- a reference image is a photo of a real object or a hand sketch; the agent models it by asking for dimensions drawn over it
+- it lives in the project as `refs/<name>.jpg` and `refs/<name>.json`, tracked in git like STEP files
+- the app shrinks an added image so the agent sees it at full size: at most 1568 px on a side and 1.15 megapixels, saved as JPEG
+- an image belongs to one modeling file, its `entry`, set when it is added; it is added to the file on screen, so a new part starts as a new file
+- `<name>.json` is `{ image, size: [w, h], entry, dims: [{ id, label, kind, a: [x, y], b: [x, y], c?, value }] }`, with points in image pixels from the top left
+- `kind` is `length` (a to b, the default), `diameter` (a and b across the circle through its center), `radius` (a the center, b on the circle) or `angle` (c the vertex, a and b on each ray); values are mm, or degrees for an angle
+- a dim with `value: null` is the agent asking; a number is the person's, measured on the object or meant on a sketch, and wins over the image
+- an end point need not be exact: the label and the value carry the meaning
+- adding an image, by the button or a drop on the view, starts an agent turn: the agent models a draft in `entry` with every dimension a named param, marks guessed ones `// estimated`, and asks for the dims it needs
+- the agent asks in rounds, the most important first; it never changes or removes a value the person gave
+- the left panel lists the images of the file on screen; opening one shows it over the view, and switching files closes it
+- photo mode: the image covers the view with its dims; the person types values, drags end points, drags on the image to add a dim, or removes one
+- dims are drawn CAD style, with arrows at both ends; a radius has one, on the circle; a dim the agent asks for is dashed
+- a label holds the value, with `Ø` or `R` before a diameter or radius; its name shows on hover or while typing
+- a length's label reads along its line, above or below it; when it does not fit between the arrows it goes beyond one end, and the line runs on to it; when it covers another label, a line or an end point, the line moves off its points, with extension lines
+- a diameter or radius turns about its center instead, and its label follows the length rules
+- an angle is an arc between its rays, its label outside the arc; when the label does not fit, it goes beyond one end and the arc runs on to it; the arc grows to clear other labels, and rays reach it with extension lines
+- the person draws lengths; the agent may ask any kind
+- overlay mode: the image sits faded over the model and passes the pointer through, so the person orbits the model to match the image; the screenshot sent carries both
+- `P` switches between the two modes; closing the image goes back to the model
+- every message sent with an image open names it and lists its dims; sending saves the person's dims first, and needs no text when they changed
+- an update from the agent keeps the person's unsent edits
+
 ## measuring
 
 - outside draw mode, a click picks a face, or an edge within a few pixels of the pointer; picking it again drops it, and empty space clears all
@@ -192,6 +219,8 @@
 - wip: drawn strokes stay in place when a joint moves; pins follow their part
 - wip: sketch constraint solver, draft, drawings, sheet metal
 - wip: isolating the agent from the person's global settings
+- wip: reference images: match the overlay camera to the image from dim end points; zoom the image
+- not yet verified: how close the agent places asked dims on real photos and sketches
 - wip: npm distribution. Node will not strip types under `node_modules`, so vibecad runs from this repo today; a release needs compiled output
 - wip: local speech recognition. Chrome's Web Speech sends audio to a cloud service
 - not yet verified: identical geometry across macOS, Linux and Windows; large assemblies; real microphone input; a successful codex turn
@@ -222,3 +251,4 @@
 - 2026-11-12: keep each feature's result, so a changed part rebuilds only what its change reaches
 - 2026-11-12: build refused fillets whose section changes along the edge, or whose face curves across it
 - 2026-11-12: add libraries of instances and factory folders, imported as `lib:` and `factory:`, with a built-in `std`
+- 2026-11-13: add reference images: the agent models a photo or sketch and asks for dimensions over it

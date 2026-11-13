@@ -119,11 +119,86 @@ button { font: inherit; color: inherit; }
 #files { flex: none; }
 #files header { display: flex; align-items: center; gap: var(--s2); padding-left: var(--s2); }
 #project-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#new-file-form { padding: var(--s1) 0; }
+#new-file-name { width: 100%; height: 28px; padding: 0 var(--s2); border: 1px solid var(--accent); border-radius: 6px; background: transparent; color: inherit; font: var(--font-sm) var(--mono); }
+#new-file-error { padding-top: var(--s1); color: var(--danger); font-size: var(--font-sm); }
+#empty-file { display: flex; flex-direction: column; align-items: center; gap: var(--s3); max-width: 320px; text-align: center; }
 #tree { max-height: 40vh; overflow-y: auto; }
 #tree .row { align-items: center; gap: var(--s1); }
 #tree .row svg { width: 12px; height: 12px; flex: none; color: var(--muted); }
 #tree .row[aria-expanded="true"] svg { transform: rotate(90deg); }
 #tree .note { padding: var(--s1) var(--s2); color: var(--muted); font-size: var(--font-sm); }
+
+#photos header { display: flex; align-items: center; gap: var(--s2); padding-left: var(--s2); }
+#photos header .name { flex: 1; color: var(--muted); font-size: var(--font-sm); }
+#photo-list .note { padding: var(--s1) var(--s2); color: var(--muted); font-size: var(--font-sm); }
+
+#photo { position: absolute; inset: 0; z-index: 1; background: var(--bg); }
+#photo.overlay { background: transparent; pointer-events: none; }
+#photo.overlay #photo-labels { display: none; }
+#photo-img, #photo-svg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+#photo-svg { cursor: crosshair; touch-action: none; }
+#photo-svg circle { fill: var(--accent); stroke: #fff; stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: grab; }
+#photo.overlay #photo-svg circle { display: none; }
+#photo-labels { position: absolute; inset: 0; pointer-events: none; }
+/* Dims drawn CAD style in screen pixels; the white glow keeps them readable on any photo. */
+#photo-decor { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff); }
+#photo-decor .dim { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+#photo-decor .ext { stroke: var(--accent); stroke-width: 1; }
+#photo-decor .arrow { fill: var(--accent); }
+#photo-decor .asked .dim { stroke-dasharray: 6 4; }
+.dim-label {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--panel); /* readable on a photo */
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: auto;
+  white-space: nowrap;
+}
+.dim-label span { color: var(--muted); }
+/* The name shows above the label on hover or while typing, so the label itself is just the value, as in CAD. */
+.dim-label .name {
+  position: absolute;
+  bottom: calc(100% + 3px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--text);
+  color: var(--panel);
+  visibility: hidden;
+}
+.dim-label:hover .name, .dim-label:focus-within .name { visibility: visible; }
+.dim-label b { color: var(--accent); font-weight: 600; }
+.dim-label input { width: 44px; height: 18px; padding: 0 2px; border: 1px solid var(--line); border-radius: 3px; background: transparent; color: inherit; font: inherit; text-align: right; }
+/* Remove sits just outside the label and shows on hover, so it takes no room in the layout. */
+.dim-label .icon { position: absolute; left: 100%; top: 50%; width: 18px; height: 18px; transform: translateY(-50%); visibility: hidden; }
+.dim-label:hover .icon, .dim-label:focus-within .icon { visibility: visible; }
+.dim-label .icon svg { width: 11px; height: 11px; }
+#photo-bar {
+  position: absolute;
+  z-index: 2;
+  top: var(--s3);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+#photo-opacity { width: 100px; accent-color: var(--accent); }
+.segmented { display: flex; gap: 2px; }
+.segmented button { height: 28px; padding: 0 var(--s3); border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
+.segmented button:hover { background: var(--hover); }
+.segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
 
 #source { font: var(--font-sm)/1.5 var(--mono); overflow: auto; max-height: 50vh; flex: none; }
 #source .file { color: var(--muted); padding: 0 var(--s1) var(--s1); white-space: nowrap; }

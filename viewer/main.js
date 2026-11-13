@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { measure } from "./measure.js";
+import { ARROW, layoutDims } from "./dims.js";
 
 const $ = (id) => document.getElementById(id);
 const stage = $("stage"), viewport = $("viewport"), ink = $("ink"), input = $("input");
@@ -71,6 +72,9 @@ let buildPending = false; // the tab on screen is building
 let loadToken = 0;
 const collapsed = new Set();
 const LAST_OPENED = "vibecad.lastOpened";
+// The open reference image. edited and removed hold the person's unsent changes, by dim id.
+const photo = { name: null, doc: null, mode: "edit", edited: new Set(), removed: new Set(), drag: null };
+let photoList = []; // { name, entry } of every image in the project
 
 function decode(b64, Type) {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -448,6 +452,7 @@ function resize() {
   camera.updateProjectionMatrix();
   ink.width = w * devicePixelRatio;
   ink.height = h * devicePixelRatio;
+  renderPhoto();
 }
 new ResizeObserver(resize).observe(stage);
 
@@ -803,6 +808,15 @@ function screenshot() {
   ctx.fillRect(0, 0, out.width, out.height);
   ctx.drawImage(src, 0, 0, out.width, out.height);
   const k = out.width / stage.clientWidth;
+  const img = $("photo-img");
+  if (photo.name && photo.mode === "overlay" && img.naturalWidth) {
+    // The agent sees what the person compares: the image faded over the model.
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const s = Math.min(stage.clientWidth / w, stage.clientHeight / h);
+    ctx.globalAlpha = Number($("photo-opacity").value);
+    ctx.drawImage(img, ((stage.clientWidth - w * s) / 2) * k, ((stage.clientHeight - h * s) / 2) * k, w * s * k, h * s * k);
+    ctx.globalAlpha = 1;
+  }
   drawInk(ctx, k);
   for (const r of refs) {
     const s = project(r.point);
@@ -1154,12 +1168,31 @@ function renderTree() {
   $("tree").replaceChildren(...rows);
 }
 function renderEmpty() {
-  const text = !opened.root ? "" : !opened.entry ? "Select a file" : buildPending ? "Building..." : "";
+  const blank = !!opened.tabs.find((t) => t.file === opened.entry)?.empty && !photo.name;
+  const text = !opened.root || blank ? "" : !opened.entry ? "Create or select a file" : buildPending ? "Building..." : "";
   $("open-first").hidden = !!opened.root;
+  $("empty-file").hidden = !blank;
   $("empty-text").textContent = text;
   $("empty-text").hidden = !text;
-  $("empty").hidden = !!opened.root && !text;
+  $("empty").hidden = !!opened.root && !text && !blank;
 }
+function showNewFile(on) {
+  $("new-file-form").hidden = !on;
+  $("new-file-error").hidden = true;
+  $("new-file-name").value = "";
+  if (on) $("new-file-name").focus();
+}
+$("new-file").onclick = () => showNewFile($("new-file-form").hidden);
+$("new-file-name").onkeydown = (e) => {
+  if (e.key === "Escape") showNewFile(false);
+};
+$("new-file-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const res = await post("/file/new", { path: $("new-file-name").value });
+  if (res.ok) return showNewFile(false);
+  $("new-file-error").textContent = (await res.json()).error;
+  $("new-file-error").hidden = false;
+};
 function renderTabs() {
   const bar = $("tabs");
   bar.hidden = !opened.tabs.length;
@@ -1211,7 +1244,8 @@ function applyEntry(e) {
     if (!e.tabs.some((t) => t.file === file)) keptByTab.delete(file);
   }
   buildPending = !!e.entry && e.building === e.entry;
-  input.disabled = $("mic").disabled = !e.entry;
+  if (photo.name && photo.doc?.entry !== e.entry) closePhoto(); // an image belongs to its file
+  renderPhotoList();
   updateSend();
   renderTabs();
   renderTree();
@@ -1233,8 +1267,10 @@ function applyProject(e) {
     for (const file of [...views.keys()]) dropView(file);
     keptByTab.clear();
     opened.entry = null;
+    closePhoto();
   }
   opened = { ...opened, root: e.root, name: e.name, files: e.files, truncated: e.truncated };
+  photoList = e.photos ?? [];
   applyEntry(e);
   if (e.root) return;
   try {
@@ -1291,6 +1327,267 @@ $("picker-open").onclick = async () => {
   if (res.ok) $("picker").close();
 };
 
+// --- Reference images: the agent asks for dims over a photo or sketch -------
+const SVG_NS = "http://www.w3.org/2000/svg";
+const PHOTO_PX = 1568; // the agent sees an image this size or smaller as is, so its pixels match ours
+const PHOTO_AREA = 1.15e6;
+const photoDirty = () => !!photo.name && (photo.edited.size > 0 || photo.removed.size > 0);
+
+function renderPhotoList() {
+  $("photos").hidden = !opened.entry;
+  const mine = photoList.filter((p) => p.entry === opened.entry).map((p) => p.name);
+  const rows = mine.map((name) => row(name, "", name === photo.name, () => (name === photo.name ? closePhoto() : openPhoto(name))));
+  if (!rows.length) rows.push(note("Add or drop a photo or sketch to model this file from it"));
+  $("photo-list").replaceChildren(...rows);
+  renderEmpty();
+}
+async function fetchPhoto(name) {
+  const res = await fetch(`/photo?name=${encodeURIComponent(name)}`);
+  return res.ok ? res.json() : null;
+}
+async function openPhoto(name) {
+  const doc = await fetchPhoto(name);
+  if (!doc) return;
+  Object.assign(photo, { name, doc });
+  photo.edited.clear();
+  photo.removed.clear();
+  $("photo-img").src = `/photo/image?name=${encodeURIComponent(name)}`;
+  setPhotoMode("edit");
+  renderPhotoList();
+  updateSend();
+}
+function closePhoto() {
+  Object.assign(photo, { name: null, doc: null, drag: null });
+  $("photo").hidden = $("photo-bar").hidden = true;
+  renderPhotoList();
+  updateSend();
+}
+function setPhotoMode(mode) {
+  photo.mode = mode;
+  $("photo").hidden = $("photo-bar").hidden = !photo.name;
+  $("photo").classList.toggle("overlay", mode === "overlay");
+  $("photo").style.opacity = mode === "overlay" ? $("photo-opacity").value : "";
+  $("photo-edit").setAttribute("aria-pressed", mode === "edit");
+  $("photo-overlay").setAttribute("aria-pressed", mode === "overlay");
+  $("photo-opacity").hidden = mode !== "overlay";
+  renderPhoto();
+}
+/** The agent rewrote the image's json: take it, keeping the person's unsent edits. */
+async function photosChanged(e) {
+  photoList = e.photos;
+  const open = photoList.find((p) => p.name === photo.name);
+  if (photo.name && open?.entry !== opened.entry) closePhoto();
+  renderPhotoList();
+  if (!photo.name || !e.changed.includes(photo.name) || photo.drag) return;
+  const name = photo.name;
+  const doc = await fetchPhoto(name);
+  if (!doc || photo.name !== name) return;
+  const mine = new Map(photo.doc.dims.filter((d) => photo.edited.has(d.id)).map((d) => [d.id, d]));
+  doc.dims = doc.dims.filter((d) => !photo.removed.has(d.id)).map((d) => mine.get(d.id) ?? d);
+  for (const [id, d] of mine) if (!doc.dims.some((x) => x.id === id)) doc.dims.push(d);
+  photo.doc = doc;
+  renderPhoto();
+  updateSend();
+}
+function imagePoint(e) {
+  const p = new DOMPoint(e.clientX, e.clientY).matrixTransform($("photo-svg").getScreenCTM().inverse());
+  const [w, h] = photo.doc.size;
+  return [Math.min(w, Math.max(0, p.x)), Math.min(h, Math.max(0, p.y))];
+}
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+function editDim(d) {
+  photo.edited.add(d.id);
+  updateSend();
+}
+const unitOf = (d) => (d.kind === "angle" ? "°" : "mm");
+const PREFIX = { diameter: "Ø", radius: "R" };
+function dimLabel(d) {
+  const el = document.createElement("div");
+  el.className = `dim-label${d.value == null ? " asked" : ""}`;
+  el.dataset.id = d.id;
+  if (d.label) {
+    const label = document.createElement("span");
+    label.className = "name";
+    label.textContent = d.label;
+    el.append(label);
+  }
+  if (PREFIX[d.kind]) {
+    const prefix = document.createElement("b");
+    prefix.textContent = PREFIX[d.kind];
+    el.append(prefix);
+  }
+  const value = document.createElement("input");
+  value.type = "number";
+  value.step = "any";
+  value.min = "0";
+  value.placeholder = "?";
+  value.value = d.value ?? "";
+  value.setAttribute("aria-label", `${d.label || "Dimension"} in ${unitOf(d)}`);
+  value.oninput = () => {
+    d.value = value.valueAsNumber >= 0 ? value.valueAsNumber : null;
+    el.classList.toggle("asked", d.value == null);
+    document.querySelector(`#photo-decor g[data-id="${CSS.escape(d.id)}"]`)?.classList.toggle("asked", d.value == null);
+    editDim(d);
+  };
+  value.onkeydown = (e) => {
+    if (e.key === "Enter" && !e.isComposing) send();
+  };
+  const unit = document.createElement("span");
+  unit.textContent = unitOf(d);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon";
+  remove.title = "Remove dimension";
+  remove.setAttribute("aria-label", "Remove dimension");
+  remove.innerHTML = '<svg><use href="#i-x"/></svg>';
+  remove.onclick = () => {
+    photo.doc.dims = photo.doc.dims.filter((x) => x !== d);
+    photo.edited.delete(d.id);
+    photo.removed.add(d.id);
+    renderPhoto();
+    updateSend();
+  };
+  el.append(value, unit, remove);
+  return el;
+}
+/** The points to drag, in image pixels. */
+function renderHandles() {
+  const svg = $("photo-svg");
+  const k = svg.getScreenCTM()?.a || 1;
+  const out = [];
+  for (const d of photo.doc.dims) {
+    for (const end of ["a", "b", "c"]) {
+      if (!d[end]) continue;
+      const c = svgEl("circle", { cx: d[end][0], cy: d[end][1], r: 5 / k });
+      c.onpointerdown = (e) => {
+        if (e.button !== 0) return;
+        e.stopPropagation();
+        photo.drag = { d, end };
+        svg.setPointerCapture(e.pointerId);
+      };
+      out.push(c);
+    }
+  }
+  svg.replaceChildren(...out);
+}
+const pt = (p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
+function arcPath({ c, r, from, to }) {
+  const p = [c[0] + r * Math.cos(from), c[1] + r * Math.sin(from)], q = [c[0] + r * Math.cos(to), c[1] + r * Math.sin(to)];
+  return `M${pt(p)} A${r} ${r} 0 ${Math.abs(to - from) > Math.PI ? 1 : 0} ${to > from ? 1 : 0} ${pt(q)}`;
+}
+function arrowPath({ at, dir }) {
+  const back = [at[0] - dir[0] * ARROW, at[1] - dir[1] * ARROW], n = [-dir[1] * 3.2, dir[0] * 3.2];
+  return `M${pt(at)} L${pt([back[0] + n[0], back[1] + n[1]])} L${pt([back[0] - n[0], back[1] - n[1]])}Z`;
+}
+/** Draws the dims CAD style: arrows, extension lines and labels along their lines, laid out by dims.js. */
+function renderPhoto() {
+  if (!photo.doc || $("photo").hidden) return;
+  const svg = $("photo-svg");
+  svg.setAttribute("viewBox", `0 0 ${photo.doc.size[0]} ${photo.doc.size[1]}`);
+  const m = svg.getScreenCTM();
+  if (!m) return;
+  renderHandles();
+  const layer = $("photo-labels");
+  const box = layer.getBoundingClientRect();
+  const toLayer = (p) => {
+    const q = new DOMPoint(p[0], p[1]).matrixTransform(m);
+    return [q.x - box.left, q.y - box.top];
+  };
+  const dims = photo.doc.dims;
+  const labels = dims.map(dimLabel);
+  const decor = svgEl("svg", { id: "photo-decor" });
+  layer.replaceChildren(decor, ...labels);
+  const laid = layoutDims(dims.map((d, i) => ({
+    kind: d.kind ?? "length", a: toLayer(d.a), b: toLayer(d.b), ...(d.c && { c: toLayer(d.c) }),
+    w: labels[i].offsetWidth, h: labels[i].offsetHeight,
+  })), box.width, box.height);
+  laid.forEach((g, i) => {
+    const el = labels[i];
+    el.style.left = `${g.label.c[0]}px`;
+    el.style.top = `${g.label.c[1]}px`;
+    el.style.transform = `translate(-50%, -50%) rotate(${g.label.deg}deg)`;
+    const group = svgEl("g", { "data-id": dims[i].id, class: dims[i].value == null ? "asked" : "" });
+    for (const [p, q] of g.ext) group.append(svgEl("line", { x1: p[0], y1: p[1], x2: q[0], y2: q[1], class: "ext" }));
+    for (const [p, q] of g.lines) group.append(svgEl("line", { x1: p[0], y1: p[1], x2: q[0], y2: q[1], class: "dim" }));
+    if (g.arc) group.append(svgEl("path", { d: arcPath(g.arc), class: "dim" }));
+    for (const a of g.arrows) group.append(svgEl("path", { d: arrowPath(a), class: "arrow" }));
+    decor.append(group);
+  });
+}
+{
+  const svg = $("photo-svg");
+  // Drag on the image to add a dim; drag an end point to move it.
+  svg.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || !photo.doc) return;
+    const p = imagePoint(e);
+    const d = { id: `p${Date.now().toString(36)}`, label: "", a: p, b: [...p], value: null };
+    photo.doc.dims.push(d);
+    photo.drag = { d, end: "b", fresh: true, x: e.clientX, y: e.clientY };
+    svg.setPointerCapture(e.pointerId);
+    renderPhoto();
+  });
+  svg.addEventListener("pointermove", (e) => {
+    if (!photo.drag) return;
+    photo.drag.d[photo.drag.end] = imagePoint(e);
+    renderPhoto();
+  });
+  const finish = (e) => {
+    const g = photo.drag;
+    photo.drag = null;
+    if (!g) return;
+    if (g.fresh && Math.hypot(e.clientX - g.x, e.clientY - g.y) < 8) {
+      photo.doc.dims = photo.doc.dims.filter((x) => x !== g.d);
+      return renderPhoto();
+    }
+    editDim(g.d);
+    renderPhoto();
+    if (g.fresh) $("photo-labels").querySelector(`[data-id="${g.d.id}"] input`)?.focus();
+  };
+  svg.addEventListener("pointerup", finish);
+  svg.addEventListener("pointercancel", finish);
+}
+/** Shrinks the image so the agent sees it at full size, saves it, and asks the agent to model it. */
+async function addPhoto(file) {
+  if (!file || !opened.entry) return;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    return showBanner({ message: "Could not read that image", hint: "Use a JPEG or PNG" });
+  }
+  const s = Math.min(1, PHOTO_PX / Math.max(bitmap.width, bitmap.height), Math.sqrt(PHOTO_AREA / (bitmap.width * bitmap.height)));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bitmap.width * s);
+  c.height = Math.round(bitmap.height * s);
+  c.getContext("2d").drawImage(bitmap, 0, 0, c.width, c.height);
+  const res = await post("/photo", { name: file.name, image: c.toDataURL("image/jpeg", 0.9), size: [c.width, c.height] });
+  const d = await res.json();
+  if (!res.ok) return showBanner({ message: d.error });
+  if (!photoList.some((p) => p.name === d.name)) photoList.push({ name: d.name, entry: opened.entry });
+  await openPhoto(d.name);
+  await send(true);
+}
+$("add-photo").onclick = $("empty-photo").onclick = () => $("photo-file").click();
+$("photo-file").onchange = () => {
+  addPhoto($("photo-file").files[0]);
+  $("photo-file").value = "";
+};
+stage.addEventListener("dragover", (e) => {
+  if (opened.entry && e.dataTransfer.types.includes("Files")) e.preventDefault();
+});
+stage.addEventListener("drop", (e) => {
+  e.preventDefault();
+  addPhoto([...e.dataTransfer.files].find((f) => f.type.startsWith("image/")));
+});
+$("photo-edit").onclick = () => setPhotoMode("edit");
+$("photo-overlay").onclick = () => setPhotoMode("overlay");
+$("photo-opacity").oninput = () => ($("photo").style.opacity = $("photo-opacity").value);
+$("photo-close").onclick = closePhoto;
+
 // --- Conversation -----------------------------------------------------------
 function addMessage(m) {
   const log = $("log");
@@ -1317,7 +1614,9 @@ function updateSend() {
   send.title = stop ? "Stop agent" : "Send";
   send.querySelector("use").setAttribute("href", stop ? "#i-stop" : "#i-send");
   send.dataset.stop = stop ? "1" : "";
-  send.disabled = !stop && !opened.entry;
+  const target = opened.entry || photo.name;
+  send.disabled = !stop && !target;
+  input.disabled = $("mic").disabled = !target;
 }
 function insertToken(n) {
   if (listening) {
@@ -1338,14 +1637,22 @@ function payload() {
   }
   return out;
 }
-async function send() {
+/** Sends the draft. An open image goes along, with the person's dims when they changed; force sends with no text. */
+async function send(force = false) {
   const text = input.value.trim();
-  if (!text || !opened.entry) return;
-  const body = { text, refs: payload(), pose: movedJoints(), screenshot: screenshot() };
+  const dirty = photoDirty();
+  if (!opened.entry && !photo.name) return;
+  if (!text && !dirty && !force) return;
+  const body = { text, refs: payload(), pose: movedJoints(), ...(model && { screenshot: screenshot() }) };
+  if (photo.name) body.photo = { name: photo.name, ...(dirty && { dims: photo.doc.dims.map(({ id, label, a, b, value }) => ({ id, label, a, b, value })) }) };
   input.value = "";
   clearRefs();
   updateSend();
   const res = await fetch("/feedback", { method: "POST", body: JSON.stringify(body) });
+  if (res.ok && dirty) {
+    photo.edited.clear();
+    photo.removed.clear();
+  }
   if (!res.ok) {
     input.value = text;
     addMessage({ role: "agent", kind: "error", text: "Sending failed because the preview server did not accept it. Check that vibecad dev is running, then send again." });
@@ -1400,7 +1707,7 @@ function setMic(on) {
   $("composer").classList.toggle("listening", on);
 }
 function startListening() {
-  if (listening || !opened.entry) return;
+  if (listening || (!opened.entry && !photo.name)) return;
   const err = $("mic-error");
   err.hidden = true;
   if (!Recognition) {
@@ -1453,7 +1760,7 @@ function cancelListening() {
 $("mic").onclick = () => (listening ? stopListening() : startListening());
 
 // --- Keyboard ---------------------------------------------------------------
-const typing = () => document.activeElement === input || document.activeElement?.type === "number" || $("picker").open;
+const typing = () => document.activeElement === input || ["number", "text"].includes(document.activeElement?.type) || $("picker").open;
 addEventListener("keydown", (e) => {
   if (typing()) {
     if (e.key === "Escape" && !$("picker").open) document.activeElement.blur();
@@ -1462,7 +1769,8 @@ addEventListener("keydown", (e) => {
   if (e.code === "Space") {
     e.preventDefault();
     if (!e.repeat) startListening();
-  } else if (e.key === "d" || e.key === "D") setDraw(!drawMode);
+  } else if ((e.key === "p" || e.key === "P") && photo.name) setPhotoMode(photo.mode === "edit" ? "overlay" : "edit");
+  else if (e.key === "d" || e.key === "D") setDraw(!drawMode);
   else if (e.key === "f" || e.key === "F") fit();
   else if (e.key === "Escape") {
     clearRefs();
@@ -1504,6 +1812,8 @@ events.onmessage = (ev) => {
   } else if (e.type === "files") {
     opened = { ...opened, files: e.files, truncated: e.truncated };
     renderTree();
+  } else if (e.type === "photos") {
+    photosChanged(e);
   } else if (e.type === "message") {
     addMessage(e);
   } else if (e.type === "status") {
