@@ -102,6 +102,17 @@ button { font: inherit; color: inherit; }
   min-width: 0;
 }
 .row:hover { background: var(--hover); }
+#file-menu {
+  position: fixed;
+  z-index: 10;
+  min-width: 140px;
+  padding: var(--s1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 4px 16px rgb(0 0 0 / .18);
+}
+#file-menu .row:disabled { opacity: .4; cursor: default; }
 .row[aria-current="true"] { background: var(--accent); color: var(--accent-text); }
 .row[aria-current="true"] .row.place { align-items: center; gap: var(--s1); }
 .row.place svg { width: 12px; height: 12px; flex: none; color: var(--muted); }

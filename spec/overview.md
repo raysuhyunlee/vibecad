@@ -140,6 +140,7 @@
 - a message carries only the pins of the tab it is sent from
 - only the tab on screen builds; a save rebuilds it over the kept model, unless its build is still fresh
 - stopping the app stops its running build; a build whose working directory is gone fails with `NO_WORKING_DIR`
+- right-clicking a file in the left panel, or Cmd/Ctrl+E for the file on screen, opens a menu to export it as STEP or STL; the server runs `vibecad export`, which reuses a fresh kept build, and the browser downloads the file named after the source; a failed export shows in the banner
 - other `.ts` files are plain code: not listed, but saving one rebuilds
 - the left panel has a slider per joint; moving one changes the view without a rebuild, using the joint data in `model.json`, and never writes the source
 - the viewer's pose stays with its tab through rebuilds; a message carries the joints moved away from the source

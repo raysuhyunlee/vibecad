@@ -1148,10 +1148,65 @@ function treeRows(node, depth = 0) {
     b.title = f.path;
     if (f.path === opened.entry) b.setAttribute("aria-current", "true");
     b.onclick = () => openFile(f.path);
+    b.oncontextmenu = (e) => {
+      e.preventDefault();
+      showFileMenu(f.path, e.clientX, e.clientY);
+    };
     out.push(b);
   }
   return out;
 }
+// --- Export -------------------------------------------------------------------
+let menuFile = null;
+let exporting = false;
+function showFileMenu(file, x, y) {
+  const menu = $("file-menu");
+  menuFile = file;
+  menu.hidden = false;
+  menu.style.left = `${Math.min(x, innerWidth - menu.offsetWidth - 8)}px`;
+  menu.style.top = `${Math.min(y, innerHeight - menu.offsetHeight - 8)}px`;
+  menu.querySelector("button").focus();
+}
+function hideFileMenu() {
+  $("file-menu").hidden = true;
+  menuFile = null;
+}
+/** Opens the export menu for the file on screen, under its row in the file list. */
+function exportOpenFile() {
+  if (!opened.entry) return;
+  const row = [...$("tree").querySelectorAll(".row")].find((r) => r.title === opened.entry);
+  const box = row?.getBoundingClientRect();
+  showFileMenu(opened.entry, box ? box.left + 16 : 16, box ? box.bottom : 16);
+}
+async function exportFile(file, format) {
+  if (exporting) return;
+  exporting = true;
+  for (const b of $("file-menu").querySelectorAll("button")) b.disabled = true;
+  try {
+    const res = await fetch(`/export?file=${encodeURIComponent(file)}&format=${format}`);
+    if (!res.ok) return showBanner({ message: (await res.json()).error });
+    const name = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? `export.${format}`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await res.blob());
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  } finally {
+    exporting = false;
+    for (const b of $("file-menu").querySelectorAll("button")) b.disabled = false;
+  }
+}
+for (const b of $("file-menu").querySelectorAll("button")) {
+  b.onclick = () => {
+    const file = menuFile;
+    hideFileMenu();
+    if (file) exportFile(file, b.dataset.format);
+  };
+}
+addEventListener("pointerdown", (e) => {
+  if (!$("file-menu").hidden && !$("file-menu").contains(e.target)) hideFileMenu();
+});
+
 function note(text) {
   const el = document.createElement("div");
   el.className = "note";
@@ -1762,6 +1817,11 @@ $("mic").onclick = () => (listening ? stopListening() : startListening());
 // --- Keyboard ---------------------------------------------------------------
 const typing = () => document.activeElement === input || ["number", "text"].includes(document.activeElement?.type) || $("picker").open;
 addEventListener("keydown", (e) => {
+  if (!$("file-menu").hidden && e.key === "Escape") return hideFileMenu();
+  if ((e.metaKey || e.ctrlKey) && (e.key === "e" || e.key === "E") && !$("picker").open) {
+    e.preventDefault();
+    return exportOpenFile();
+  }
   if (typing()) {
     if (e.key === "Escape" && !$("picker").open) document.activeElement.blur();
     return;

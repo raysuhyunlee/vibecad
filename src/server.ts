@@ -1,8 +1,8 @@
 // The live preview server: rebuilds on save, and carries human feedback to the agent.
 import { spawn, type ChildProcess } from "node:child_process";
-import { accessSync, constants, existsSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { accessSync, constants, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { constants as osConstants, homedir } from "node:os";
+import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AgentRunner, cliCommand } from "./agent.ts";
@@ -471,6 +471,34 @@ export async function serve(o: {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(`{"version":${tab.version},"model":${JSON.stringify(b.model)},"meshes":${b.meshes}}`);
           return;
+        }
+        if (path === "/export") {
+          const target = projectEntry(url.searchParams.get("file"));
+          const format = url.searchParams.get("format");
+          if (!target) return json(res, { error: "That file is no longer in the project." }, 404);
+          if (format !== "step" && format !== "stl") return json(res, { error: "Export as step or stl" }, 400);
+          // The CLI reuses the kept build, so a fresh file exports without rebuilding.
+          const dir = mkdtempSync(join(tmpdir(), "vibecad-export-"));
+          const out = join(dir, `${basename(target).replace(/\.cad\.ts$|\.(step|stp)$/i, "")}.${format}`);
+          try {
+            const r = await new Promise<any>((done) => {
+              const child = spawn(process.execPath, [CLI, "export", target, "--out", out], { stdio: ["ignore", "pipe", "ignore"] });
+              let text = "";
+              child.stdout.on("data", (d) => (text += d));
+              child.on("close", () => {
+                try { done(JSON.parse(text)); } catch { done({ ok: false, error: { message: "The export process crashed. Run vibecad export for details." } }); }
+              });
+            });
+            if (!r.ok) return json(res, { error: r.error?.message ?? "Export failed" }, 422);
+            res.writeHead(200, {
+              "content-type": "application/octet-stream",
+              "content-disposition": `attachment; filename="${basename(out)}"`,
+              "cache-control": "no-store",
+            });
+            return res.end(readFileSync(out));
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
         }
         if (path === "/source") {
           const target = projectFile(url.searchParams.get("file"), (p) => p.endsWith(".ts"));
