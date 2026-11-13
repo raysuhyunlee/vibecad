@@ -42,7 +42,8 @@ assembly/
    ```
 
 4. An assembly places only `.cad.ts` instances. To use one twice, `place` it: `const footMotor = place(ax12)`.
-5. Before making left and right versions, check whether the part is mirror-symmetric. If it is, it is one part: make one instance, and give it a port per side where the two differ.
+5. Take standard parts from a library instead of modeling them: `import bolt from "lib:std/bolt-m3x8"`. For a size the library lacks, call its factory in a file of your own: `export default bolt({ size: "M4", length: 30 })` with `import { bolt } from "factory:std"`. Parts you reuse across projects go in `~/.vibecad/libs/<name>/` as `.cad.ts` files.
+6. Before making left and right versions, check whether the part is mirror-symmetric. If it is, it is one part: make one instance, and give it a port per side where the two differ.
 
    ```ts
    ports: {
@@ -53,7 +54,7 @@ assembly/
 
    To check, intersect the two solids: they are the same part when the common volume equals each volume. The foot was symmetric; the pelvis was not, so it keeps two files.
 
-6. Build and test every file you touched, parts first:
+7. Build and test every file you touched, parts first:
 
    ```bash
    vibecad build parts/foot.cad.ts && vibecad test parts/foot.cad.ts

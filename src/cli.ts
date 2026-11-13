@@ -3,11 +3,11 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { build, CadError, FEATURES_VERSION, getKernel, type BuildOutput, type KeptFeature, type MeshData, type Model, type PartBuild, type PartStore } from "./eval.ts";
-import { buildDir, digest, ensureDir, isFresh, toolDigest, type BuildInputs } from "./fs.ts";
+import { ABSENT, buildDir, digest, ensureDir, isFresh, resolveShelf, sharedBuildDir, shadows, toolDigest, type BuildInputs } from "./fs.ts";
 import { isInstance, originOf, STEP_FILE, stepEntry, type Instance, type Solid } from "./lang.ts";
 
 // The project's modules as they load: each file's content digest, and what each imports.
@@ -17,12 +17,13 @@ const counted = (url: string) => url.startsWith("file:") && !url.startsWith(OWN)
 const digests = new Map<string, string>();
 const imports = new Map<string, Set<string>>();
 
-// Projects anywhere on disk import the language as "vibecad".
+// Projects anywhere on disk import the language as "vibecad", and libraries and factories as "lib:" and "factory:".
 registerHooks({
   resolve: (specifier, context, next) => {
+    const shelf = resolveShelf(specifier);
     const r = specifier === "vibecad"
       ? { url: new URL("./index.ts", import.meta.url).href, shortCircuit: true }
-      : next(specifier, context);
+      : shelf ? { url: pathToFileURL(shelf).href, shortCircuit: true } : next(specifier, context);
     const from = context.parentURL;
     if (from && counted(from) && counted(r.url)) imports.set(from, (imports.get(from) ?? new Set()).add(r.url));
     return r;
@@ -81,6 +82,13 @@ function describe(e: unknown) {
 /** The `.cad.ts` or STEP file each loaded instance is, relative to the project. One file is one instance. */
 const fileOf = new Map<Instance, string>();
 const rel = (path: string) => relative(process.cwd(), path).split(sep).join("/");
+/** Where a file's build is kept: a shared library's instance in the person's home, a project file in the project, else nowhere. */
+const keptDir = (file: string) => sharedBuildDir(file) ?? (file.startsWith("../") || isAbsolute(file) ? undefined : buildDir(file));
+/** Inside the project a path is relative, so the project can move; outside it is absolute, so any project can read a shared build. */
+const inputPath = (path: string) => {
+  const r = rel(path);
+  return r.startsWith("../") || isAbsolute(r) ? resolve(path) : r;
+};
 
 /** A `.cad.ts` module's instance: its default export, and no other. */
 function instanceOf(file: string, mod: Record<string, unknown>) {
@@ -131,11 +139,16 @@ async function load(entry: string): Promise<{ root: Instance; file: string }> {
 function inputsOf(file: string, inst: Instance, steps: boolean): BuildInputs {
   const files: Record<string, string> = {};
   const seen = new Set<string>();
+  // A shared build serves every project, and a project's own library folder never reaches it, so skip those.
+  const shared = !!sharedBuildDir(file);
   const visit = (u: string) => {
     if (seen.has(u)) return;
     seen.add(u);
     const d = digests.get(u);
-    if (d) files[rel(fileURLToPath(u))] = d;
+    if (d) files[inputPath(fileURLToPath(u))] = d;
+    for (const dir of shadows.get(fileURLToPath(u)) ?? []) {
+      if (!(shared && !isAbsolute(inputPath(dir)))) files[inputPath(dir)] = ABSENT; // a library here would replace it
+    }
     for (const next of imports.get(u) ?? []) visit(next);
   };
   if (!STEP_FILE.test(file)) visit(pathToFileURL(resolve(file)).href);
@@ -145,7 +158,7 @@ function inputsOf(file: string, inst: Instance, steps: boolean): BuildInputs {
     solids.add(s);
     if (s.op === "importStep") {
       const path = String(s.args.path);
-      if (existsSync(path)) files[rel(path)] = digest(readFileSync(path));
+      if (existsSync(path)) files[inputPath(path)] = digest(readFileSync(path));
     }
     s.inputs.forEach(walk);
   };
@@ -194,15 +207,14 @@ function writeFeatures(dir: string, features: Map<string, KeptFeature>) {
 function diskStore(k: Awaited<ReturnType<typeof getKernel>>): PartStore {
   const placeOf = (inst: Instance) => {
     const file = fileOf.get(inst);
-    return file && !file.startsWith("../") ? file : undefined; // only parts inside the project are kept
+    return file && keptDir(file); // project and library parts are kept
   };
   // Features each part's build used, kept or new; only these are written back.
   const used = new Map<Instance, Map<string, KeptFeature>>();
   return {
     get(inst, steps) {
-      const file = placeOf(inst);
-      if (!file) return undefined;
-      const dir = buildDir(file);
+      const dir = placeOf(inst);
+      if (!dir) return undefined;
       if (!existsSync(`${dir}/shape.brep`) || !isFresh(dir, steps)) return undefined;
       try {
         const model: Model = JSON.parse(readFileSync(`${dir}/model.json`, "utf8"));
@@ -220,16 +232,16 @@ function diskStore(k: Awaited<ReturnType<typeof getKernel>>): PartStore {
       }
     },
     put(inst, b, solo) {
-      const file = placeOf(inst);
-      if (!file) return;
-      writeOutputs(solo, buildDir(file), inputsOf(file, inst, !!b.steps), k.toBREPBinary(b.shape));
+      const dir = placeOf(inst);
+      if (!dir) return;
+      writeOutputs(solo, dir, inputsOf(fileOf.get(inst)!, inst, !!b.steps), k.toBREPBinary(b.shape));
       const features = used.get(inst);
-      if (features) writeFeatures(buildDir(file), features);
+      if (features) writeFeatures(dir, features);
     },
     features(inst) {
-      const file = placeOf(inst);
-      if (!file) return undefined;
-      const kept = readFeatures(buildDir(file));
+      const dir = placeOf(inst);
+      if (!dir) return undefined;
+      const kept = readFeatures(dir);
       const now = new Map<string, KeptFeature>();
       used.set(inst, now);
       return { get: (key) => kept.get(key), put: (key, f) => void now.set(key, f) };
@@ -362,7 +374,7 @@ async function main() {
   switch (cmd) {
     case "build": {
       // A posed build is not the instance as its source states it, so it is not kept.
-      const dir = Object.keys(pose).length ? OUT_DIR : buildDir(file);
+      const dir = Object.keys(pose).length ? OUT_DIR : keptDir(file) ?? buildDir(file);
       writeOutputs(out, dir, inputsOf(file, root, !!o.steps));
       print({ ok: true, ...summary(out.model), artifacts: `${dir}/model.json` });
       return;

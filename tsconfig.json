@@ -9,7 +9,8 @@
     "erasableSyntaxOnly": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": { "factory:std": ["./factories/std/index.ts"] }
   },
-  "include": ["src", "examples", "test"]
+  "include": ["src", "examples", "test", "libs", "factories"]
 }

@@ -37,6 +37,8 @@ const pipe = sweep(circle(1), spine([0, 0, 0]).line([0, 0, 20]).tangentArc([0, 1
 const neck = loft([{ profile: rect(20, 20), on: plane([0, 0, 0]) }, { profile: circle(5), on: plane([0, 0, 30]) }]).named("neck");
 ```
 
+Standard and shared parts come from libraries, folders of instances: `import bolt from "lib:std/bolt-m3x8"`. Factories that make them come from factory folders: `import { bearing } from "factory:std"`. Add your own as folders in the project's `libs/` or `factories/`, or in `~/.vibecad/`.
+
 An assembly imports other files' instances, `import plate from "./plate.cad.ts"`, and `place(plate)` places one again. Each part is built once and kept in `.vibecad/builds`, so an assembly reuses it.
 
 Joints make an assembly move. Drag a joint's slider in the app, or set a pose from the CLI with `--pose pan=30`. `vibecad test` checks `noCollision` across the joint's range.
@@ -51,6 +53,8 @@ return { parts: { servo, horn }, joints: { pan }, checks: [noCollision(horn, ser
 ```text
 src/       language, evaluator, CLI, preview server, agent adapters
 viewer/    live preview
+libs/      built-in libraries of instances
+factories/ built-in factories
 examples/  sample projects
 spec/      specifications
 docs/      tutorials

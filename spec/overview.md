@@ -10,6 +10,7 @@
 - object oriented: a factory is typed, params are its dimension interface, ports are its connections
 - one file, one instance: a `*.cad.ts` file default-exports one part or assembly, so every one can be built and viewed alone
 - files are modules: assemblies import the instances of other `*.cad.ts` files; factories live in plain `.ts` files
+- libraries and factories are shelves anyone can add to: a library is a folder of instances, a factory folder holds code that makes them; built-in features like `extrude` are factories too
 - everything is a function: built-in features and user functions have the same shape
 - agent first: every capability is a CLI command that prints JSON; errors carry code, source line and hint
 - the CLI takes actions; settings live in `~/.vibecad/config.json`
@@ -70,6 +71,15 @@
 - a factory used by one instance can stay unexported in its file; one shared by several goes in a plain `.ts` file
 - an assembly places only `.cad.ts` files' instances, at every depth, else `NOT_EXPORTED`
 - `place(x)` places an instance again; the same one twice in one assembly is `PLACED_TWICE`
+
+## libraries and factories
+
+- a library is a folder of `.cad.ts` files, a finite set of instances; `import bolt from "lib:std/bolt-m3x8"` imports `std/bolt-m3x8.cad.ts`, and it is placed like a project file's
+- a factory folder holds plain `.ts` code; `import { bolt } from "factory:std"` imports `std/index.ts`, and `factory:std/x` imports `std/x.ts`
+- a folder is looked up in the project's `libs/` or `factories/`, then `~/.vibecad/libs/` or `~/.vibecad/factories/`, then vibecad's own; the first folder of that name wins whole, so a project pins a library by copying it in
+- a name with no folder, or a library path with no file, is `NO_LIBRARY` or `NO_FACTORY`, and the hint lists where it looked
+- vibecad ships `lib:std` and `factory:std`: ISO 4762 socket head cap screws, ISO 4032 hex nuts, ISO 7089 washers and deep groove ball bearings, at nominal size without threads; each sits on z=0 with `seat`/`tip` or `bottom`/`top` ports
+- adding a library or factory is adding a folder; there is no install command yet
 - mates, joints and checks name the places of their own assembly; a joint's path is the place path, so a placed assembly's joints are each its own
 - rules: `check minClearance noOverlap`, run on every build
 - sweeps: `noCollision(a, b, { joint, steps })` samples a joint's range, only in `vibecad test`, and reports the first failing value; collisions between samples can be missed
@@ -94,8 +104,10 @@
 ## builds
 
 - each file's build is kept in `.vibecad/builds/<file>/` until someone deletes it; a part's also holds its solid as BRep
+- builds are kept by scope: a project file's, including the project's own `libs/`, in the project; a home or built-in library instance's in `~/.vibecad/builds/lib/<name>/<file>`, which every project reuses; a home folder hides vibecad's of the same name, so they share it
+- inside the project an input's path is relative, so the project can move; outside it is absolute
 - an assembly reuses the kept build of each part while it is fresh, and builds and keeps the rest; sub-assemblies at any depth compose from the same part builds, and each part is built once however often it is placed
-- each build records what it read in `inputs.json`: a content digest of the file and every file it imports, any STEP file it loads, and vibecad's own source, and whether it has feature meshes; a build is fresh while all of them match
+- each build records what it read in `inputs.json`: a content digest of the file and every file it imports, any STEP file it loads, and vibecad's own source, and whether it has feature meshes; and each library or factory folder that would replace one it used, which must stay absent; a build is fresh while all of them match
 - the app and the CLI share kept builds, so an agent's build serves the app too
 - a part's build also keeps its features: their BReps one after another in `features.brep`, and in `features.json` each one's key, face names and place in that file; a part that changed rebuilds only the features its change reaches
 - a feature's key is a digest of its op, name, arguments and inputs, and a loaded STEP file's content, but not its source line, so moving code keeps it; a kept face points at the line of the feature that made it in the current source
@@ -209,3 +221,4 @@
 - 2026-11-12: click to measure faces and edges; pins move to draw mode
 - 2026-11-12: keep each feature's result, so a changed part rebuilds only what its change reaches
 - 2026-11-12: build refused fillets whose section changes along the edge, or whose face curves across it
+- 2026-11-12: add libraries of instances and factory folders, imported as `lib:` and `factory:`, with a built-in `std`
