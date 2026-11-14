@@ -121,6 +121,8 @@
 
 - `~/.vibecad/config.json`, per user because the app starts before any project opens; read when the app starts
 - `port` (4173), `agent` (`claude`), `model` (agent default)
+- `permissions` (`ask`): `ask` or `all`; `allowedTools` (`[]`): tools allowed on first use, as agent permission rules
+- the settings dialog in the chat header changes `permissions` and removes `allowedTools`, writing the file and applying from the next turn
 - every key is optional; an unknown key or a bad value stops the app with an error
 
 ## app and projects
@@ -211,7 +213,10 @@
 - one session per agent per git branch, in gitignored `.vibecad/sessions.json`
 - a session is a disposable cache: durable decisions live in code, commits and `AGENTS.md`
 - messages sent during a turn queue and go in the next turn; stop is one button
-- permissions are preset for the session: file edits and the vibecad CLI
+- `ask`: the agent runs with file edits, the vibecad CLI and `allowedTools`; it cannot prompt mid-turn, so a tool it was refused shows in the chat after the turn with Allow and Deny; Allow adds it to `allowedTools` and sends a turn to try again
+- a refused shell command is allowed by its program (`Bash(git:*)`), any other tool by name
+- `all`: claude runs with `bypassPermissions`, codex with `danger-full-access`
+- codex never reports refusals, so under `ask` it stays in its workspace sandbox
 
 ## status
 
