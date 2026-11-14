@@ -2,7 +2,9 @@
 // Sessions never touch the user's open terminal sessions.
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -23,7 +25,25 @@ export interface Permissions {
   allowed: string[];
 }
 
+/** Opens the first prompt of every session vibecad starts, which tells its sessions from the person's own. */
+export const INTRO = "You are editing a vibecad model from a person's live feedback.";
+
+export interface PastSession {
+  id: string;
+  title: string;
+  updated: number;
+}
+export type ChatMessage = { role: "user" | "agent"; kind: "text" | "tool"; text: string };
+
+interface History {
+  /** vibecad's past sessions for the working directory, newest first. */
+  list(): PastSession[];
+  /** A session's conversation as the chat shows it. */
+  load(id: string): ChatMessage[];
+}
+
 interface Adapter {
+  history?: History;
   /** The prompt always goes through stdin, so no shell ever parses it. */
   command(session: string | undefined, model: string | undefined, perms: Permissions): { cmd: string; args: string[]; newSession?: string };
   parse(event: any): { session?: string; events: AgentEvent[] };
@@ -45,7 +65,71 @@ export function ruleFor(tool: string, input: unknown) {
   return program ? `Bash(${program}:*)` : tool;
 }
 
+/** What the person said in one prompt: the prompt quotes each message as JSON. */
+function said(prompt: string) {
+  return [...prompt.matchAll(/^Person said: (".*")$/gm)].map((m) => JSON.parse(m[1]!) as string).filter(Boolean);
+}
+
+// Claude keeps each session at ~/.claude/projects/<cwd with every other character as "-">/<id>.jsonl.
+const claudeDir = () => join(homedir(), ".claude", "projects", process.cwd().replace(/[^A-Za-z0-9]/g, "-"));
+const claudeHistory: History = {
+  list() {
+    const dir = claudeDir();
+    if (!existsSync(dir)) return [];
+    const found: PastSession[] = [];
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".jsonl")) continue;
+      const file = join(dir, name);
+      // The first prompt sits near the top; a session file can be many megabytes.
+      const head = Buffer.alloc(64 * 1024);
+      const fd = openSync(file, "r");
+      const n = readSync(fd, head, 0, head.length, 0);
+      closeSync(fd);
+      let title: string | undefined;
+      for (const line of head.subarray(0, n).toString().split("\n")) {
+        let e: any;
+        try {
+          e = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (e.type !== "user" || typeof e.message?.content !== "string") continue;
+        // A turn from an image alone has no words; the file it was for names it then.
+        if (e.message.content.startsWith(INTRO)) title = said(e.message.content)[0] ?? e.message.content.match(/^Viewing: (.+)$/m)?.[1] ?? "";
+        break;
+      }
+      if (title !== undefined) found.push({ id: name.slice(0, -6), title, updated: statSync(file).mtimeMs });
+    }
+    return found.sort((a, b) => b.updated - a.updated);
+  },
+  load(id) {
+    const file = join(claudeDir(), `${id}.jsonl`);
+    if (!/^[\w-]+$/.test(id) || !existsSync(file)) return [];
+    const out: ChatMessage[] = [];
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      let e: any;
+      try {
+        e = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (e.isSidechain) continue;
+      const content = e.message?.content;
+      if (e.type === "user" && typeof content === "string") {
+        for (const text of said(content)) out.push({ role: "user", kind: "text", text });
+      } else if (e.type === "assistant" && Array.isArray(content)) {
+        for (const b of content) {
+          if (b.type === "text" && b.text) out.push({ role: "agent", kind: "text", text: b.text });
+          if (b.type === "tool_use") out.push({ role: "agent", kind: "tool", text: `${b.name} ${short(b.input)}`.trim() });
+        }
+      }
+    }
+    return out;
+  },
+};
+
 const claude: Adapter = {
+  history: claudeHistory,
   command(session, model, perms) {
     const newSession = session ? undefined : randomUUID();
     return {
@@ -160,6 +244,17 @@ export class AgentRunner {
   }
   newSession() {
     this.saveSession(undefined);
+  }
+  /** Continues a past session from the next turn. */
+  useSession(id: string) {
+    this.saveSession(id);
+  }
+  pastSessions() {
+    return this.adapter.history?.list() ?? [];
+  }
+  /** The current session's conversation, or a past one's. */
+  messages(id = this.session()) {
+    return id && this.adapter.history ? this.adapter.history.load(id) : [];
   }
 
   /** Runs one turn. Resolves when the agent exits. */

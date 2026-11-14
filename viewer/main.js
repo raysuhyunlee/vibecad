@@ -1754,13 +1754,42 @@ $("settings").addEventListener("click", (e) => {
   if (e.target === $("settings")) $("settings").close();
 });
 
+// --- Past sessions -----------------------------------------------------------
+function historyError(text) {
+  $("history-error").textContent = text;
+  $("history-error").hidden = !text;
+}
+const when = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+$("open-history").onclick = async () => {
+  historyError("");
+  $("history-list").replaceChildren();
+  $("history").showModal();
+  const res = await post("/sessions", {});
+  const d = await res.json();
+  if (!res.ok) return historyError(d.error);
+  const list = $("history-list");
+  list.replaceChildren(...d.sessions.map((s) => {
+    return row(s.title || "Untitled", when.format(s.updated), s.id === d.current, async () => {
+      if (s.id === d.current) return $("history").close();
+      const opened = await post("/session/open", { id: s.id });
+      if (opened.ok) $("history").close();
+      else historyError(`Opening the session failed: ${(await opened.json()).error}`);
+    });
+  }));
+  if (!d.sessions.length) list.append(note("No past sessions in this project"));
+};
+$("history-close").onclick = () => $("history").close();
+$("history").addEventListener("click", (e) => {
+  if (e.target === $("history")) $("history").close();
+});
+
 function setRunning(on, queued = 0) {
   running = on;
   updateSend();
   const q = $("queued");
   q.hidden = queued === 0;
   q.textContent = `${queued} waiting for the agent`;
-  $("new-session").disabled = on || !opened.root;
+  $("new-session").disabled = $("open-history").disabled = on || !opened.root;
 }
 function updateSend() {
   const send = $("send");

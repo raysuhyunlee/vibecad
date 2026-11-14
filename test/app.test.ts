@@ -30,7 +30,7 @@ function startApp(config: unknown) {
     stdio: ["ignore", "pipe", "ignore"],
   });
   child.on("close", () => rmSync(home, { recursive: true, force: true }));
-  return child;
+  return Object.assign(child, { home });
 }
 const app = startApp({ port: PORT });
 await new Promise((ok) => app.stdout.once("data", ok));
@@ -102,6 +102,27 @@ test("a project outside this repo opens, lists files and builds main.cad.ts", as
   assert.deepEqual(hello.files, ["main.cad.ts", "parts/other.cad.ts"]);
   const { model }: any = await (await fetch(`${URL_BASE}/model`)).json();
   assert.equal(model.parts[0].type, "A");
+});
+
+test("past vibecad sessions are listed, and opening one loads its conversation", async () => {
+  const dir = join(app.home, ".claude/projects", root.replace(/[^A-Za-z0-9]/g, "-"));
+  mkdirSync(dir, { recursive: true });
+  const line = (v: unknown) => JSON.stringify(v) + "\n";
+  writeFileSync(join(dir, "s1.jsonl"),
+    line({ type: "session-owner" }) +
+    line({ type: "user", message: { content: `You are editing a vibecad model from a person's live feedback. Etc.\n\nViewing: main.cad.ts\nPerson said: "make it taller"` } }) +
+    line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "main.cad.ts" } }, { type: "text", text: "Done." }] } }) +
+    line({ type: "user", message: { content: [{ type: "tool_result", content: "x" }] } }));
+  writeFileSync(join(dir, "mine.jsonl"), line({ type: "user", message: { content: "a terminal session" } }));
+  const { sessions }: any = await (await post("/sessions", {})).json();
+  assert.deepEqual(sessions.map((s: any) => [s.id, s.title]), [["s1", "make it taller"]]);
+  assert.equal((await post("/session/open", { id: "mine" })).status, 404);
+  assert.equal((await post("/session/open", { id: "s1" })).status, 200);
+  const hello = await nextEvent((e) => e.type === "hello");
+  assert.deepEqual(hello.log.map((m: any) => [m.role, m.kind, m.text]), [
+    ["user", "text", "make it taller"], ["agent", "tool", "Read main.cad.ts"], ["agent", "text", "Done."],
+  ]);
+  assert.equal((await post("/session/new", {})).status, 200);
 });
 
 test("switching files rebuilds the new entry and stays inside the root", async () => {

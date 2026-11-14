@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AgentRunner, cliCommand } from "./agent.ts";
+import { AgentRunner, cliCommand, INTRO } from "./agent.ts";
 import { CONFIG_FILE, saveConfig, type Config } from "./config.ts";
 import type { FaceInfo, Model } from "./eval.ts";
 import { buildDir, ensureDir, isFresh } from "./fs.ts";
@@ -390,7 +390,8 @@ export async function serve(o: {
     tabs.clear();
     if (previous) rmSync(resolve(previous, DEV_FILE), { force: true });
     root = process.cwd();
-    log.length = 0;
+    // The chat picks up where this project's session left off.
+    log.splice(0, log.length, ...agent.messages());
     queue.length = 0;
     ensureDir(".vibecad");
     writeFileSync(".vibecad/.gitignore", "*\n");
@@ -425,7 +426,7 @@ export async function serve(o: {
   const prompt = (batch: Feedback[], fresh: boolean) => {
     const cli = cliCommand();
     const intro = fresh
-      ? `You are editing a vibecad model from a person's live feedback. Each message names the entry file they are viewing. ` +
+      ? `${INTRO} Each message names the entry file they are viewing. ` +
         `Read AGENTS.md if it exists, and ${TUTORIAL} for how to lay out a project. Change the TypeScript source, never generated files. ` +
         `The preview rebuilds on every save. Verify with \`${cli} build <entry>\` and \`${cli} test <entry>\`. ` +
         `Use \`${cli} render <entry>\` to see the result, add \`--labels\` to number each face and get its name, and use\`${cli} show --part P --face F --message M\` ` +
@@ -690,6 +691,21 @@ export async function serve(o: {
         agent.newSession();
         log.length = 0;
         emit({ type: "reset" });
+        return json(res, { ok: true });
+      }
+      if (path === "/sessions") {
+        if (!root) return json(res, { error: "Open a project first" }, 409);
+        return json(res, { current: agent.session(), sessions: agent.pastSessions() });
+      }
+      if (path === "/session/open") {
+        if (!root) return json(res, { error: "Open a project first" }, 409);
+        if (agent.running) return json(res, { error: "Stop the agent first" }, 409);
+        const id = String(JSON.parse(await readBody(req)).id);
+        if (!agent.pastSessions().some((s) => s.id === id)) return json(res, { error: "That session is no longer on disk." }, 404);
+        agent.useSession(id);
+        queue.length = 0;
+        log.splice(0, log.length, ...agent.messages(id));
+        emit(hello());
         return json(res, { ok: true });
       }
       if (path === "/permission") {

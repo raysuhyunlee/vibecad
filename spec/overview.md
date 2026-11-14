@@ -212,6 +212,10 @@
 - vibecad owns its sessions and never touches the person's open terminal sessions
 - one session per agent per git branch, in gitignored `.vibecad/sessions.json`
 - a session is a disposable cache: durable decisions live in code, commits and `AGENTS.md`
+- the chat is read back from the agent's own transcript: opening a project shows its current session's conversation
+- the history button lists the project's past sessions, newest first, titled by their first message; opening one continues it from the next turn
+- vibecad's sessions are the transcripts whose first prompt starts with its intro, so the person's own sessions in the folder stay out
+- claude only for now: transcripts under `~/.claude/projects/`; codex lists none
 - messages sent during a turn queue and go in the next turn; stop is one button
 - `ask`: the agent runs with file edits, the vibecad CLI and `allowedTools`; it cannot prompt mid-turn, so a tool it was refused shows in the chat after the turn with Allow and Deny; Allow adds it to `allowedTools` and sends a turn to try again
 - a refused shell command is allowed by its program (`Bash(git:*)`), any other tool by name
