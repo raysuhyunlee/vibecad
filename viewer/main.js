@@ -1674,86 +1674,11 @@ function addMessage(m) {
   const log = $("log");
   const el = document.createElement("div");
   el.className = `msg ${m.role === "user" ? "user" : m.kind}`;
-  if (m.kind === "permission") {
-    el.dataset.id = m.id;
-    renderPermission(el, m);
-    log.append(el);
-    log.scrollTop = log.scrollHeight;
-    return;
-  }
   el.textContent = m.text;
   if (m.kind === "tool") el.title = m.text;
   log.append(el);
   log.scrollTop = log.scrollHeight;
 }
-// The agent was refused tools it has not used before; the person allows them once.
-function renderPermission(el, m) {
-  const tools = m.tools.map((t) => {
-    const c = document.createElement("code");
-    c.textContent = t;
-    return c;
-  });
-  const text = document.createElement("span");
-  text.textContent = m.answer === "allowed" ? "Allowed" : m.answer === "denied" ? "Denied" : "Allow the agent to use";
-  el.replaceChildren(text, ...tools);
-  if (m.answer) return el.classList.add("answered");
-  const buttons = document.createElement("div");
-  buttons.className = "buttons";
-  for (const [label, allow] of [["Allow", true], ["Deny", false]]) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = `button${allow ? " primary" : ""}`;
-    b.textContent = label;
-    b.onclick = async () => {
-      buttons.querySelectorAll("button").forEach((x) => (x.disabled = true));
-      const res = await post("/permission", { id: m.id, allow });
-      if (!res.ok) buttons.querySelectorAll("button").forEach((x) => (x.disabled = false));
-    };
-    buttons.append(b);
-  }
-  el.append(buttons);
-}
-function answerPermission(e) {
-  const el = $("log").querySelector(`.msg.permission[data-id="${e.id}"]`);
-  if (!el) return;
-  renderPermission(el, { tools: [...el.querySelectorAll("code")].map((c) => c.textContent), answer: e.answer });
-}
-
-// --- Settings ----------------------------------------------------------------
-let settings = { permissions: "ask", allowedTools: [] };
-function renderSettings() {
-  for (const b of $("settings").querySelectorAll("[data-mode]")) b.setAttribute("aria-pressed", String(b.dataset.mode === settings.permissions));
-  const tools = settings.allowedTools;
-  $("allowed").hidden = settings.permissions !== "ask" || tools.length === 0;
-  $("allowed-list").replaceChildren(...tools.map((t) => {
-    const r = document.createElement("div");
-    r.className = "tool";
-    const name = document.createElement("code");
-    name.textContent = t;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "icon";
-    remove.setAttribute("aria-label", `Remove ${t}`);
-    remove.title = "Remove";
-    remove.innerHTML = '<svg><use href="#i-x"/></svg>';
-    remove.onclick = () => saveSettings({ allowedTools: tools.filter((x) => x !== t) });
-    r.append(name, remove);
-    return r;
-  }));
-}
-async function saveSettings(change) {
-  const res = await post("/settings", change);
-  const error = res.ok ? "" : (await res.json()).error;
-  $("settings-error").textContent = error && `Saving settings failed: ${error}`;
-  $("settings-error").hidden = !error;
-}
-for (const b of $("settings").querySelectorAll("[data-mode]")) b.onclick = () => saveSettings({ permissions: b.dataset.mode });
-$("open-settings").onclick = () => $("settings").showModal();
-$("settings-close").onclick = () => $("settings").close();
-$("settings").addEventListener("click", (e) => {
-  if (e.target === $("settings")) $("settings").close();
-});
-
 // --- Past sessions -----------------------------------------------------------
 function historyError(text) {
   $("history-error").textContent = text;
@@ -1997,8 +1922,6 @@ events.onmessage = (ev) => {
     $("log").replaceChildren();
     e.log.forEach(addMessage);
     setRunning(e.running, e.queued);
-    settings = e.settings;
-    renderSettings();
   } else if (e.type === "entry") {
     applyEntry(e);
   } else if (e.type === "files") {
@@ -2008,11 +1931,6 @@ events.onmessage = (ev) => {
     photosChanged(e);
   } else if (e.type === "message") {
     addMessage(e);
-  } else if (e.type === "permission") {
-    answerPermission(e);
-  } else if (e.type === "settings") {
-    settings = e;
-    renderSettings();
   } else if (e.type === "status") {
     setRunning(e.running, e.queued);
   } else if (e.type === "reset") {

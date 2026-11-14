@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { ruleFor } from "../src/agent.ts";
 
 const CLI = new URL("../src/cli.ts", import.meta.url).pathname;
 const PORT = 4300 + (process.pid % 500);
@@ -318,17 +317,6 @@ test("a bad setting stops the app and names the file", async () => {
     assert.match(error.message, new RegExp(text));
     assert.match(error.message, /config\.json/);
   }
-});
-
-test("agent permissions are set from the app and kept in the config file", async () => {
-  assert.deepEqual((await nextEvent((e) => e.type === "hello")).settings, { permissions: "ask", allowedTools: [] });
-  assert.equal((await post("/settings", { permissions: "sometimes" })).status, 400);
-  assert.equal((await post("/settings", { permissions: "all", allowedTools: ["mcp__fusion__fusion_mcp_read"] })).status, 200);
-  assert.deepEqual((await nextEvent((e) => e.type === "hello")).settings, { permissions: "all", allowedTools: ["mcp__fusion__fusion_mcp_read"] });
-  assert.equal((await post("/settings", { permissions: "ask", allowedTools: [] })).status, 200);
-  assert.equal((await post("/permission", { id: 99, allow: true })).status, 409);
-  assert.equal(ruleFor("Bash", { command: "git status" }), "Bash(git:*)");
-  assert.equal(ruleFor("mcp__fusion__fusion_mcp_read", {}), "mcp__fusion__fusion_mcp_read");
 });
 
 test("settings are not CLI flags", () => {

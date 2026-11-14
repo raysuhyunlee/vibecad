@@ -16,14 +16,7 @@ const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
 export type AgentEvent =
   | { kind: "text"; text: string }
   | { kind: "tool"; text: string }
-  | { kind: "error"; text: string }
-  /** Permission rules for tools the agent was refused this turn. */
-  | { kind: "denied"; tools: string[] };
-
-export interface Permissions {
-  mode: "ask" | "all";
-  allowed: string[];
-}
+  | { kind: "error"; text: string };
 
 /** Opens the first prompt of every session vibecad starts, which tells its sessions from the person's own. */
 export const INTRO = "You are editing a vibecad model from a person's live feedback.";
@@ -45,7 +38,7 @@ interface History {
 interface Adapter {
   history?: History;
   /** The prompt always goes through stdin, so no shell ever parses it. */
-  command(session: string | undefined, model: string | undefined, perms: Permissions): { cmd: string; args: string[]; newSession?: string };
+  command(session: string | undefined, model?: string): { cmd: string; args: string[]; newSession?: string };
   parse(event: any): { session?: string; events: AgentEvent[] };
 }
 
@@ -56,13 +49,6 @@ function short(input: unknown) {
 
 export function cliCommand() {
   return `node ${/\s/.test(CLI) ? JSON.stringify(CLI) : CLI}`;
-}
-
-/** The rule that allows a refused tool: a shell command by its program, any other tool by name. */
-export function ruleFor(tool: string, input: unknown) {
-  if (tool !== "Bash") return tool;
-  const program = String((input as { command?: unknown })?.command ?? "").trim().split(/\s+/)[0];
-  return program ? `Bash(${program}:*)` : tool;
 }
 
 /** What the person said in one prompt: the prompt quotes each message as JSON. */
@@ -130,17 +116,17 @@ const claudeHistory: History = {
 
 const claude: Adapter = {
   history: claudeHistory,
-  command(session, model, perms) {
+  command(session, model) {
     const newSession = session ? undefined : randomUUID();
     return {
       cmd: "claude",
       args: [
         "-p",
         "--output-format", "stream-json", "--verbose",
-        ...(perms.mode === "all"
-          ? ["--permission-mode", "bypassPermissions"]
-          : ["--permission-mode", "acceptEdits",
-            "--allowedTools", `Bash(${cliCommand()}:*)`, "Read", "Edit", "Write", "Glob", "Grep", ...perms.allowed]),
+        "--permission-mode", "acceptEdits",
+        "--allowedTools", `Bash(${cliCommand()}:*)`, "Read", "Edit", "Write", "Glob", "Grep",
+        // No MCP servers: the agent works through files and the vibecad CLI only.
+        "--strict-mcp-config",
         ...(session ? ["--resume", session] : ["--session-id", newSession!]),
         ...(model ? ["--model", model] : []),
       ],
@@ -148,12 +134,8 @@ const claude: Adapter = {
     };
   },
   parse(e) {
-    if (e.type === "result") {
-      const events: AgentEvent[] = [];
-      if (e.is_error) events.push({ kind: "error", text: String(e.result ?? "The agent turn failed.") });
-      const tools = (e.permission_denials ?? []).map((d: any) => ruleFor(String(d.tool_name), d.tool_input));
-      if (tools.length) events.push({ kind: "denied", tools: [...new Set<string>(tools)] });
-      return { events };
+    if (e.type === "result" && e.is_error) {
+      return { events: [{ kind: "error", text: String(e.result ?? "The agent turn failed.") }] };
     }
     if (e.type !== "assistant") return { events: [] };
     const events: AgentEvent[] = [];
@@ -165,12 +147,11 @@ const claude: Adapter = {
   },
 };
 
-// Codex never asks in exec mode, so "ask" keeps it in its workspace sandbox.
 const codex: Adapter = {
-  command(session, model, perms) {
+  command(session, model) {
     const options = [
       "--json",
-      "-c", perms.mode === "all" ? 'sandbox_mode="danger-full-access"' : 'sandbox_mode="workspace-write"',
+      "-c", 'sandbox_mode="workspace-write"',
       ...(model ? ["-m", model] : []),
     ];
     return {
@@ -209,16 +190,13 @@ export class AgentRunner {
   readonly model: string | undefined;
   readonly adapter: Adapter;
   child: ChildProcess | undefined;
-  /** Read at the start of each turn, so a settings change applies to the next one. */
-  perms: Permissions;
 
-  constructor(kind: string, model: string | undefined, perms: Permissions) {
+  constructor(kind: string, model?: string) {
     const adapter = ADAPTERS[kind];
     if (!adapter) throw new Error(`Unknown agent "${kind}". Use: ${Object.keys(ADAPTERS).join(", ")}`);
     this.kind = kind;
     this.model = model;
     this.adapter = adapter;
-    this.perms = perms;
   }
 
   get running() {
@@ -260,7 +238,7 @@ export class AgentRunner {
   /** Runs one turn. Resolves when the agent exits. */
   run(prompt: string, onEvent: (e: AgentEvent) => void): Promise<void> {
     const session = this.session();
-    const { cmd, args, newSession } = this.adapter.command(session, this.model, this.perms);
+    const { cmd, args, newSession } = this.adapter.command(session, this.model);
     return new Promise((done) => {
       // Windows launches npm-installed CLIs through .cmd shims, which need a shell.
       // Arguments here are fixed flags and ids. The prompt goes through stdin.

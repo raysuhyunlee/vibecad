@@ -6,7 +6,7 @@ import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AgentRunner, cliCommand, INTRO } from "./agent.ts";
-import { CONFIG_FILE, saveConfig, type Config } from "./config.ts";
+import { CONFIG_FILE } from "./config.ts";
 import type { FaceInfo, Model } from "./eval.ts";
 import { buildDir, ensureDir, isFresh } from "./fs.ts";
 import { STEP_FILE } from "./lang.ts";
@@ -187,11 +187,9 @@ export async function serve(o: {
   port: number;
   agent: string;
   model?: string;
-  permissions: Config["permissions"];
-  allowedTools: string[];
   print: (v: unknown) => void;
 }) {
-  const agent = new AgentRunner(o.agent, o.model, { mode: o.permissions, allowed: [...o.allowedTools] });
+  const agent = new AgentRunner(o.agent, o.model);
   const clients = new Set<ServerResponse>();
   const log: unknown[] = [];
   const queue: Feedback[] = [];
@@ -204,7 +202,6 @@ export async function serve(o: {
   const tabs = new Map<string, Tab>();
   let version = 0;
   let feedbackId = 0;
-  let permissionId = 0;
 
   const emit = (event: unknown) => {
     const data = `data: ${JSON.stringify(event)}\n\n`;
@@ -230,9 +227,8 @@ export async function serve(o: {
   };
   const hello = () => ({
     type: "hello", root, name: root && basename(root), ...project, ...entryState(), photos: root ? listPhotos() : [],
-    log, running: agent.running, queued: queue.length, agent: o.agent, settings: settings(),
+    log, running: agent.running, queued: queue.length, agent: o.agent,
   });
-  const settings = () => ({ permissions: agent.perms.mode, allowedTools: agent.perms.allowed });
 
   // --- Builds ---------------------------------------------------------------
   /** The file's build on disk. Throws when there is none. */
@@ -446,16 +442,9 @@ export async function serve(o: {
     if (agent.running || queue.length === 0) return;
     const batch = queue.splice(0);
     const text = prompt(batch, !agent.session());
-    const denied = new Set<string>();
-    const turn = agent.run(text, (e) => {
-      if (e.kind === "denied") e.tools.forEach((t) => denied.add(t));
-      else say({ role: "agent", ...e });
-    });
+    const turn = agent.run(text, (e) => say({ role: "agent", ...e }));
     status();
     await turn;
-    // Asked once per tool: the person's answer to an allowed tool is already in the settings.
-    const ask = [...denied].filter((t) => !agent.perms.allowed.includes(t));
-    if (ask.length && agent.perms.mode === "ask") say({ role: "agent", kind: "permission", id: ++permissionId, tools: ask });
     status();
     void flush();
   };
@@ -706,36 +695,6 @@ export async function serve(o: {
         queue.length = 0;
         log.splice(0, log.length, ...agent.messages(id));
         emit(hello());
-        return json(res, { ok: true });
-      }
-      if (path === "/permission") {
-        const b = JSON.parse(await readBody(req));
-        const m = log.find((x: any) => x.kind === "permission" && x.id === Number(b.id)) as { id: number; tools: string[]; answer?: string } | undefined;
-        if (!m || m.answer) return json(res, { error: "This request was already answered." }, 409);
-        m.answer = b.allow ? "allowed" : "denied";
-        emit({ type: "permission", id: m.id, answer: m.answer });
-        if (b.allow) {
-          agent.perms.allowed = [...new Set([...agent.perms.allowed, ...m.tools])];
-          saveConfig({ allowedTools: agent.perms.allowed });
-          emit({ type: "settings", ...settings() });
-          queue.push({ text: `I allowed ${m.tools.join(", ")}. Try again what it was refused for.`, refs: [], ...(entry && { entry }) });
-          status();
-          void flush();
-        }
-        return json(res, { ok: true });
-      }
-      if (path === "/settings") {
-        const b = JSON.parse(await readBody(req));
-        if (b.permissions !== undefined) {
-          if (b.permissions !== "ask" && b.permissions !== "all") return json(res, { error: 'permissions must be "ask" or "all"' }, 400);
-          agent.perms.mode = b.permissions;
-        }
-        if (b.allowedTools !== undefined) {
-          if (!Array.isArray(b.allowedTools)) return json(res, { error: "allowedTools must be a list" }, 400);
-          agent.perms.allowed = b.allowedTools.map(String);
-        }
-        saveConfig({ permissions: agent.perms.mode, allowedTools: agent.perms.allowed });
-        emit({ type: "settings", ...settings() });
         return json(res, { ok: true });
       }
       if (path === "/show") {

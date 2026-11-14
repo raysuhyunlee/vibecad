@@ -325,11 +325,6 @@ button { font: inherit; color: inherit; }
 .msg.user { align-self: flex-end; max-width: 90%; padding: var(--s1) var(--s3); border-radius: 12px; background: var(--hover); }
 .msg.tool { flex: none; color: var(--muted); font: var(--font-sm)/1.4 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .msg.error { color: var(--danger); }
-.msg.permission { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); padding: var(--s2) var(--s3); border: 1px solid var(--line); border-radius: var(--radius); }
-.msg.permission code, #allowed-list code { font: var(--font-sm)/1.4 var(--mono); overflow-wrap: anywhere; }
-.msg.permission .buttons { display: flex; gap: var(--s2); width: 100%; justify-content: flex-end; }
-.msg.permission .button:not(.primary) { background: var(--hover); }
-.msg.permission.answered { color: var(--muted); }
 .working { color: var(--muted); font-size: var(--font-sm); }
 
 #composer { display: flex; flex-direction: column; gap: var(--s2); margin: var(--s3); padding: var(--s2); border: 1px solid var(--line); border-radius: 12px; }
@@ -396,15 +391,9 @@ button { font: inherit; color: inherit; }
 .sheet::backdrop { background: #0006; }
 .sheet header { display: flex; align-items: center; justify-content: space-between; padding: var(--s2) var(--s2) var(--s2) var(--s4); border-bottom: 1px solid var(--line); }
 .sheet header .name { font-weight: 600; }
-#settings .field { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s4); }
-#settings .segmented button { flex: 1; }
-#allowed { display: flex; flex-direction: column; gap: var(--s1); padding: 0 var(--s4) var(--s4); }
-#allowed[hidden] { display: none; }
-#allowed .label { color: var(--muted); font-size: var(--font-sm); }
-#allowed-list .tool { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
 #history-list { max-height: min(420px, 60vh); overflow-y: auto; padding: var(--s2); }
 #history-list .note { padding: var(--s1) var(--s2); color: var(--muted); }
-#settings-error, #history-error { padding: 0 var(--s4) var(--s4); color: var(--danger); font-size: var(--font-sm); }
+#history-error { padding: 0 var(--s4) var(--s4); color: var(--danger); font-size: var(--font-sm); }
 
 @media (max-width: 900px) {
   #app { grid-template-columns: 200px minmax(0, 1fr) 260px; }
