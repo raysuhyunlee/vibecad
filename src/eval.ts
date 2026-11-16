@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { BooleanOp, JoinType, OcctKernel, SweepMode, TransitionMode, type EvolutionData, type ShapeHandle } from "occt-wasm";
 import {
   EdgeSel, Instance, isWorld, originOf, Solid, world,
-  type CheckDef, type FaceRef, type Helix, type JointDef, type MateDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Spine, type Src, type Vec3,
+  type CheckDef, type FaceRef, type Helix, type JointDef, type KnurlPattern, type MateDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Spine, type Src, type Vec3,
 } from "./lang.ts";
 
 const HASH_BOUND = 2147483647;
@@ -165,7 +165,7 @@ export interface KeptFeature {
  * Kept features from another version are rebuilt. Bump this when a change to evaluation can change
  * any feature's solid or face names; the pinned kernel version counts on its own.
  */
-export const FEATURES_VERSION = `2/occt-wasm@${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies["occt-wasm"]}`;
+export const FEATURES_VERSION = `3/occt-wasm@${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies["occt-wasm"]}`;
 /** One part's feature results by key, so a changed part rebuilds only the features after the change. `put` gets every feature the build used, kept or new. */
 export interface FeatureStore {
   get(key: string): KeptFeature | undefined;
@@ -322,7 +322,68 @@ class Evaluator {
   }
 
   isCap(n: Solid, f: ShapeHandle) {
+    if (n.op === "knurl") {
+      // Every knurl face is flat; only the ends lie in z=0 and z=height.
+      const z = this.k.getSurfaceCenterOfMass(f).z, h = (n.args as { height: number }).height;
+      return Math.abs(z) < 1e-6 || Math.abs(z - h) < 1e-6;
+    }
     return (n.op === "cylinder" || n.op === "cone") && this.k.surfaceType(f) === "plane";
+  }
+
+  /**
+   * A knurl built face by face, with no booleans: crests and groove crossings are points on rows up the axis,
+   * and each flank is a flat triangle between them. Cost grows with the face count, not with the tooth count squared of booleans.
+   */
+  knurl(n: Solid, a: { radius: number; height: number; pitch: number; depth: number; pattern: KnurlPattern; angle: number }) {
+    const k = this.k, { radius: r, height: h, depth } = a;
+    const bad = (msg: string) => new CadError("BAD_KNURL", msg, n.src);
+    if (!(r > 0 && h > 0 && a.pitch > 0)) throw bad("radius, height and pitch must be positive");
+    if (!(depth > 0 && depth < r)) throw bad(`depth ${depth} must be positive and less than the radius ${r}`);
+    if (a.pattern === "diamond" && !(a.angle > 0 && a.angle < 90)) throw bad(`angle ${a.angle} must be between 0 and 90 degrees`);
+    // Whole teeth around, and whole rows up: pitch and the row height are evened out to fit.
+    const n2 = 2 * Math.max(3, Math.round((2 * Math.PI * r) / a.pitch));
+    const p = (4 * Math.PI * r) / n2;
+    const row = a.pattern === "diamond" ? p / (2 * Math.tan((a.angle * Math.PI) / 180)) : a.pattern === "pyramid" ? p / 2 : h;
+    // A pyramid needs an even row count, so both ends lie on a ring groove.
+    const fit = Math.max(1, Math.round(h / row / (a.pattern === "pyramid" ? 2 : 1)));
+    const rows = a.pattern === "straight" ? 1 : a.pattern === "pyramid" ? 2 * fit : Math.max(2, fit);
+    // Points sit on rows up the axis, n2 to a row. A diamond's crests are at odd (row + column), groove crossings
+    // at even. A pyramid has groove crossings at even rows and columns and crests at odd ones. A straight knurl
+    // has crests at even columns.
+    const crest = (j: number, i: number) =>
+      a.pattern === "diamond" ? (i + j) % 2 === 1 : a.pattern === "pyramid" ? j % 2 === 1 && i % 2 === 1 : i % 2 === 0;
+    const pts = Array.from({ length: rows + 1 }, (_, j) => Array.from({ length: n2 }, (_, i) => {
+      const t = (2 * Math.PI * i) / n2, rr = crest(j, i) ? r : r - depth;
+      return k.makeVertex(rr * Math.cos(t), rr * Math.sin(t), (h * j) / rows);
+    }));
+    const at = (j: number, i: number) => pts[j]![(i + n2) % n2]!;
+    const face = (vs: ShapeHandle[]) => k.makeFace(k.makeWire(vs.map((v, i) => k.makeEdge(v, vs[(i + 1) % vs.length]!))));
+    const faces: ShapeHandle[] = [];
+    let ends = [pts[0]!, pts[rows]!];
+    if (a.pattern === "pyramid") {
+      // Four flanks from each crest down to the groove crossings around it.
+      for (let j = 1; j < rows; j += 2) {
+        for (let i = 1; i < n2; i += 2) {
+          const c = at(j, i), ring = [at(j - 1, i - 1), at(j - 1, i + 1), at(j + 1, i + 1), at(j + 1, i - 1)];
+          ring.forEach((v, q) => faces.push(face([v, ring[(q + 1) % 4]!, c])));
+        }
+      }
+      ends = ends.map((e) => e.filter((_, i) => i % 2 === 0));
+    } else if (a.pattern === "straight") {
+      for (let i = 0; i < n2; i++) faces.push(face([at(0, i), at(0, i + 1), at(1, i + 1), at(1, i)]));
+    } else {
+      // A diamond's flanks are the triangles of each cell, split along the groove line through its crossings.
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < n2; i++) {
+          const [a0, a1, b1, b0] = [at(j, i), at(j, i + 1), at(j + 1, i + 1), at(j + 1, i)];
+          faces.push(...(crest(j, i) ? [face([a0, a1, b0]), face([a1, b1, b0])] : [face([a0, a1, b1]), face([a0, b1, b0])]));
+        }
+      }
+    }
+    faces.push(...ends.map(face));
+    const solid = k.sewAndSolidify(faces, 1e-7);
+    this.sound(n, solid, "Check that depth is small against the radius and the pitch.");
+    return solid;
   }
 
   /** Tags a swept profile through kernel history: each wall comes from one segment, so it takes that segment's name. */
@@ -517,6 +578,8 @@ class Evaluator {
         return this.primitive(n, k.makeCone(a.r1, a.r2, a.height));
       case "sphere":
         return this.primitive(n, k.makeSphere(a.radius));
+      case "knurl":
+        return this.primitive(n, this.knurl(n, a));
       case "extrude":
         return this.onPlane(n, this.swept(n, a.profile, [a.height > 0 ? "bottom" : "top", a.height > 0 ? "top" : "bottom"], (f) =>
           k.extrudeWithHistory(f, 0, 0, a.height, [], HASH_BOUND)), this.sketchPlane(n, a.on));

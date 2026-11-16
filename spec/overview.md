@@ -30,9 +30,11 @@
 
 ## language
 
-- primitives: `box cylinder cone sphere extrude revolve sweep loft`
+- primitives: `box cylinder cone sphere knurl extrude revolve sweep loft`
 - placement: `box` is centered on XY with its base at z=0, not centered on z; `cylinder` and `cone` stand on z=0 about +z; `sphere` is centered on the origin
-- cost: each boolean is a full kernel operation, so hundreds of cuts one by one can take minutes or run out of memory; combine tool bodies into one first, or build a pattern another way, such as intersecting two grooved bodies for a knurl
+- cost: each boolean is a full kernel operation, so hundreds of cuts one by one can take minutes or run out of memory; combine tool bodies into one first, or build a pattern another way
+- `knurl(radius, height, { pitch, depth, pattern, angle })` is a knurled cylinder placed like `cylinder`, with `radius` over the crests and faces `side top bottom`; `pattern` is `diamond` (grooves at +-`angle` from the axis, default 30), `pyramid` (grooves along and around the axis) or `straight`
+- a knurl is built from flat faces between crests and groove crossings, with no booleans, so it takes well under a second; the tooth count around and the row count up are rounded to whole numbers, so the pitch and a diamond's angle shift slightly to fit, and a pyramid's ends lie on a ring groove
 - import: `importStep(file)` loads a STEP file as a solid, with its path relative to the calling source file
 - an imported file has no feature names, so its faces are `<feature>.face[i]` in file order; replacing the file can renumber them, so prefer selecting the whole feature, `edges.of("motor").curve("circle")`
 - STEP files are tracked in git, because `diff` builds revisions from git; saving one in the project rebuilds
@@ -263,3 +265,4 @@
 - 2026-11-12: build refused fillets whose section changes along the edge, or whose face curves across it
 - 2026-11-12: add libraries of instances and factory folders, imported as `lib:` and `factory:`, with a built-in `std`
 - 2026-11-13: add reference images: the agent models a photo or sketch and asks for dimensions over it
+- 2026-11-16: add the `knurl` primitive, built face by face

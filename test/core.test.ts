@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  assembly, box, check, circle, closedSpline, cone, cylinder, edges, extrude, helix, importStep, loft, mate, minClearance, noCollision, offset, onFace, outerTangent, part, path,
+  assembly, box, check, circle, closedSpline, cone, cylinder, edges, extrude, helix, importStep, knurl, loft, mate, minClearance, noCollision, offset, onFace, outerTangent, part, path,
   plane, polygon, port, rect, revolute, revolve, roundedRect, slider, sphere, spine, sweep, world,
 } from "../src/index.ts";
 import { build, CadError, getKernel, type KeptFeature, type PartStore } from "../src/eval.ts";
@@ -843,4 +843,15 @@ test("kept features are reused, keep their source lines, and give the same model
   const line = out.model.parts[0]!.faces[0]!.src.line;
   assert.notEqual(line, plain.model.parts[0]!.faces.find((f) => f.name.startsWith("base."))!.src.line);
   assert.equal(line, out.model.parts[0]!.steps[0]!.src.line);
+});
+
+test("a knurl builds face by face in each pattern, named like a cylinder", async () => {
+  for (const pattern of ["diamond", "pyramid", "straight"] as const) {
+    const m = await facesOf(knurl(7, 10, { pitch: 1.2, depth: 0.4, pattern }).named("k"));
+    assert.ok(m.volume > Math.PI * 6.6 ** 2 * 10 && m.volume < Math.PI * 7 ** 2 * 10, `${pattern} volume ${m.volume}`);
+    closeTo(m.bbox.max[2] - m.bbox.min[2], 10);
+    const kinds = new Set(m.faces.map((f) => f.id.replace(/~\d+$/, "")));
+    assert.deepEqual([...kinds].sort(), ["k.bottom", "k.side", "k.top"], pattern);
+  }
+  await assert.rejects(build(part("P", () => knurl(2, 5, { pitch: 1, depth: 3 }))()), (e: CadError) => e.code === "BAD_KNURL");
 });

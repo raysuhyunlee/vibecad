@@ -405,7 +405,7 @@ let nextId = 1;
 let opCounts = new Map<string, number>();
 
 export type OpName =
-  | "box" | "cylinder" | "cone" | "sphere" | "extrude" | "revolve" | "sweep" | "loft" | "importStep"
+  | "box" | "cylinder" | "cone" | "sphere" | "knurl" | "extrude" | "revolve" | "sweep" | "loft" | "importStep"
   | "union" | "cut" | "intersect"
   | "fillet" | "chamfer" | "shell"
   | "translate" | "rotate" | "mirror";
@@ -496,6 +496,19 @@ export function cone(r1: number, r2: number, height: number): Solid {
 }
 export function sphere(radius: number): Solid {
   return new Solid("sphere", { radius }, []);
+}
+export type KnurlPattern = "diamond" | "pyramid" | "straight";
+/**
+ * A knurled cylinder: radius over the knurl, axis on Z, base at z=0. Faces: side, top, bottom.
+ * pitch is the tooth spacing around, depth the groove depth. diamond grooves run at +-angle from the axis,
+ * pyramid grooves along the axis and around it, straight grooves along the axis only.
+ */
+export function knurl(
+  radius: number,
+  height: number,
+  opts: { pitch: number; depth: number; pattern?: KnurlPattern; angle?: number },
+): Solid {
+  return new Solid("knurl", { radius, height, pitch: opts.pitch, depth: opts.depth, pattern: opts.pattern ?? "diamond", angle: opts.angle ?? 30 }, []);
 }
 /** A sketch plane. The sketch's x lies along x, its y along z cross x, and sweeps go along +z. */
 export interface Plane {
