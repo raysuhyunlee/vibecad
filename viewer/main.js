@@ -80,6 +80,7 @@ const LAST_OPENED = "vibecad.lastOpened";
 // The open reference image. edited and removed hold the person's unsent changes, by dim id.
 const photo = { name: null, doc: null, mode: "edit", edited: new Set(), removed: new Set(), drag: null };
 let photoList = []; // { name, entry } of every image in the project
+const added = new Set(); // images added since the last send; they go with the next message
 
 function decode(b64, Type) {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -1306,6 +1307,7 @@ function applyEntry(e) {
   buildPending = !!e.entry && e.building === e.entry;
   if (photo.name && photo.doc?.entry !== e.entry) closePhoto(); // an image belongs to its file
   renderPhotoList();
+  renderAdded();
   updateSend();
   renderTabs();
   renderTree();
@@ -1328,6 +1330,7 @@ function applyProject(e) {
     keptByTab.clear();
     opened.entry = null;
     closePhoto();
+    added.clear();
   }
   opened = { ...opened, root: e.root, name: e.name, files: e.files, truncated: e.truncated };
   photoList = e.photos ?? [];
@@ -1456,6 +1459,8 @@ function setPhotoMode(mode) {
 /** The agent rewrote the image's json: take it, keeping the person's unsent edits. */
 async function photosChanged(e) {
   photoList = e.photos;
+  for (const name of added) if (!photoList.some((p) => p.name === name)) added.delete(name);
+  renderAdded();
   const open = photoList.find((p) => p.name === photo.name);
   if (photo.name && open?.entry !== opened.entry) closePhoto();
   renderPhotoList();
@@ -1631,14 +1636,49 @@ function renderPhoto() {
   svg.addEventListener("pointerup", finish);
   svg.addEventListener("pointercancel", finish);
 }
-/** Shrinks the image so the agent sees it at full size, saves it, and asks the agent to model it. */
+/** The added images of the file on screen, which go with the next message. */
+function addedHere() {
+  return photoList.filter((p) => added.has(p.name) && p.entry === opened.entry).map((p) => p.name);
+}
+function renderAdded() {
+  const names = addedHere();
+  $("added").replaceChildren(...names.map((name) => {
+    const box = document.createElement("div");
+    box.className = "thumb";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.title = open.ariaLabel = `Open ${name}`;
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = `/photo/image?name=${encodeURIComponent(name)}`;
+    open.append(img);
+    open.onclick = () => (name === photo.name ? closePhoto() : openPhoto(name));
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.className = "icon";
+    drop.title = drop.ariaLabel = `Leave ${name} out of the next message`;
+    drop.innerHTML = '<svg><use href="#i-x"/></svg>';
+    drop.onclick = () => {
+      added.delete(name);
+      renderAdded();
+    };
+    box.append(open, drop);
+    return box;
+  }));
+  updateSend();
+}
+/** Adds images one after another; they wait to go with the next message. */
+async function addPhotos(files) {
+  for (const file of files) await addPhoto(file);
+}
+/** Shrinks the image so the agent sees it at full size and saves it. */
 async function addPhoto(file) {
   if (!file || !opened.entry) return;
   let bitmap;
   try {
     bitmap = await createImageBitmap(file);
   } catch {
-    return showBanner({ message: "Could not read that image", hint: "Use a JPEG or PNG" });
+    return showBanner({ message: `Could not read ${file.name}`, hint: "Use a JPEG or PNG" });
   }
   const s = Math.min(1, PHOTO_PX / Math.max(bitmap.width, bitmap.height), Math.sqrt(PHOTO_AREA / (bitmap.width * bitmap.height)));
   const c = document.createElement("canvas");
@@ -1649,12 +1689,13 @@ async function addPhoto(file) {
   const d = await res.json();
   if (!res.ok) return showBanner({ message: d.error });
   if (!photoList.some((p) => p.name === d.name)) photoList.push({ name: d.name, entry: opened.entry });
-  await openPhoto(d.name);
-  await send(true);
+  added.add(d.name);
+  renderPhotoList();
+  renderAdded();
 }
 $("add-photo").onclick = $("empty-photo").onclick = () => $("photo-file").click();
 $("photo-file").onchange = () => {
-  addPhoto($("photo-file").files[0]);
+  addPhotos([...$("photo-file").files]);
   $("photo-file").value = "";
 };
 stage.addEventListener("dragover", (e) => {
@@ -1662,7 +1703,7 @@ stage.addEventListener("dragover", (e) => {
 });
 stage.addEventListener("drop", (e) => {
   e.preventDefault();
-  addPhoto([...e.dataTransfer.files].find((f) => f.type.startsWith("image/")));
+  addPhotos([...e.dataTransfer.files].filter((f) => f.type.startsWith("image/")));
 });
 $("photo-edit").onclick = () => setPhotoMode("edit");
 $("photo-overlay").onclick = () => setPhotoMode("overlay");
@@ -1718,10 +1759,12 @@ function setRunning(on, queued = 0) {
 }
 function updateSend() {
   const send = $("send");
-  const stop = running && !input.value.trim();
+  const images = addedHere().length;
+  const stop = running && !input.value.trim() && !images;
+  const label = stop ? "Stop agent" : images ? `Model from ${images === 1 ? "this image" : `these ${images} images`}` : "Send";
   send.className = `icon ${stop ? "danger" : "primary"}`;
-  send.setAttribute("aria-label", stop ? "Stop agent" : "Send");
-  send.title = stop ? "Stop agent" : "Send";
+  send.setAttribute("aria-label", label);
+  send.title = label;
   send.querySelector("use").setAttribute("href", stop ? "#i-stop" : "#i-send");
   send.dataset.stop = stop ? "1" : "";
   const target = opened.entry || photo.name;
@@ -1747,21 +1790,28 @@ function payload() {
   }
   return out;
 }
-/** Sends the draft. An open image goes along, with the person's dims when they changed; force sends with no text. */
-async function send(force = false) {
+/** Sends the draft. Added images and an open one go along, the open one with the person's dims when they changed. */
+async function send() {
   const text = input.value.trim();
   const dirty = photoDirty();
+  const images = addedHere();
   if (!opened.entry && !photo.name) return;
-  if (!text && !dirty && !force) return;
+  if (!text && !dirty && !images.length) return;
   const body = { text, refs: payload(), pose: movedJoints(), ...(model && { screenshot: screenshot() }) };
   if (photo.name) body.photo = { name: photo.name, ...(dirty && { dims: photo.doc.dims.map(({ id, label, a, b, value }) => ({ id, label, a, b, value })) }) };
+  if (images.length) body.photos = images;
   input.value = "";
   clearRefs();
-  updateSend();
+  for (const name of images) added.delete(name);
+  renderAdded();
   const res = await fetch("/feedback", { method: "POST", body: JSON.stringify(body) });
   if (res.ok && dirty) {
     photo.edited.clear();
     photo.removed.clear();
+  }
+  if (!res.ok) {
+    for (const name of images) added.add(name);
+    renderAdded();
   }
   if (!res.ok) {
     input.value = text;

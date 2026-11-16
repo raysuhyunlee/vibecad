@@ -176,7 +176,8 @@
 - `kind` is `length` (a to b, the default), `diameter` (a and b across the circle through its center), `radius` (a the center, b on the circle) or `angle` (c the vertex, a and b on each ray); values are mm, or degrees for an angle
 - a dim with `value: null` is the agent asking; a number is the person's, measured on the object or meant on a sketch, and wins over the image
 - an end point need not be exact: the label and the value carry the meaning
-- adding an image, by the button or a drop on the view, starts an agent turn: the agent models a draft in `entry` with every dimension a named param, marks guessed ones `// estimated`, and asks for the dims it needs
+- the person adds images, several at once, by the button or a drop on the view; adding starts no turn: the images wait as thumbnails above the message box, to open or leave out, and go with the next message, which needs no text
+- with them the agent models a draft in `entry` with every dimension a named param, marks guessed ones `// estimated`, and asks for the dims it needs, each once, on the image that shows it best
 - the agent asks in rounds, the most important first; it never changes or removes a value the person gave
 - the left panel lists the images of the file on screen; opening one shows it over the view, and switching files closes it
 - photo mode: the image covers the view with its dims; the person types values, drags end points, drags on the image to add a dim, or removes one
@@ -188,7 +189,7 @@
 - the person draws lengths; the agent may ask any kind
 - overlay mode: the image sits faded over the model and passes the pointer through, so the person orbits the model to match the image; the screenshot sent carries both
 - `P` switches between the two modes; closing the image goes back to the model
-- every message sent with an image open names it and lists its dims; sending saves the person's dims first, and needs no text when they changed
+- every message sent with an image open or added lists all the images of its file with their dims, as views of one object; sending saves the person's dims first, and needs no text when they changed
 - an update from the agent keeps the person's unsent edits
 
 ## measuring

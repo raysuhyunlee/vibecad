@@ -102,20 +102,24 @@ function cleanDims(list: unknown): Dim[] {
   }
   return out;
 }
-/** What the agent needs to model the image and ask for dimensions, every turn it is open. */
-function photoPrompt(name: string, p: Photo) {
+/** What the agent needs to model a file's images and ask for dimensions over them. */
+function photoPrompt(file: string | undefined, photos: { name: string; p: Photo }[], open?: string, added: string[] = []) {
   const n = (v: number[]) => `[${v.map(Math.round).join(",")}]`;
-  const dims = p.dims.map((d) => {
-    const at = d.kind === "angle" && d.c ? `c=${n(d.c)} a=${n(d.a)} b=${n(d.b)}` : `${n(d.a)}-${n(d.b)}`;
-    const value = d.value === null ? "asked" : `= ${d.value} ${d.kind === "angle" ? "deg" : "mm"}`;
-    return `  ${d.id} ${d.kind ?? "length"} "${d.label}" ${at} ${value}`;
+  const list = photos.map(({ name, p }) => {
+    const tags = [added.includes(name) && "new", name === open && "open on screen"].filter(Boolean);
+    const dims = p.dims.map((d) => {
+      const at = d.kind === "angle" && d.c ? `c=${n(d.c)} a=${n(d.a)} b=${n(d.b)}` : `${n(d.a)}-${n(d.b)}`;
+      const value = d.value === null ? "asked" : `= ${d.value} ${d.kind === "angle" ? "deg" : "mm"}`;
+      return `    ${d.id} ${d.kind ?? "length"} "${d.label}" ${at} ${value}`;
+    });
+    return [`- ${PHOTOS}/${p.image} (${p.size[0]}x${p.size[1]} px), dims in ${photoJson(name)}${tags.length ? ` (${tags.join(", ")})` : ""}`, ...(dims.length ? dims : ["    no dims yet"])].join("\n");
   });
   return [
-    `Reference image: ${PHOTOS}/${p.image} (${p.size[0]}x${p.size[1]} px), a photo of a real object or a hand sketch. Its dimensions are in ${photoJson(name)}.`,
-    `- Look at the image. Model the object in ${p.entry ?? "a new .cad.ts file, and set \"entry\" in the json to its project path"}, every dimension a named param; mark params you guessed \`// estimated\`.`,
-    `- Ask for the dimensions you still need by adding dims { id, label, kind, a, b, value: null }. kind is "length" (a to b), "diameter" (a and b across the circle, through its center), "radius" (a the center, b on the circle) or "angle" (c the vertex, a and b on each ray). Points are in image pixels from the top left, on the edges the dimension spans; label is a few words. Ask the few that most change the shape first; ask more in later turns.`,
-    `- A dim with a number is the person's, in mm or degrees for an angle: measured on the object or meant on a sketch. It wins over the image. Never change or remove it. Remove your asked dims you no longer need.`,
-    dims.length ? `- Dims now:\n${dims.join("\n")}` : `- No dims yet.`,
+    `Reference images: photos of one real object from different sides, or hand sketches of it.`,
+    ...list,
+    `- Look at every image${added.length ? ", the new ones closely" : ""}. Model the object in ${file ?? "a new .cad.ts file, and set \"entry\" in each json to its project path"}, every dimension a named param; mark params you guessed \`// estimated\`.`,
+    `- Ask for the dimensions you still need by adding dims { id, label, kind, a, b, value: null } to the image that shows them best. kind is "length" (a to b), "diameter" (a and b across the circle, through its center), "radius" (a the center, b on the circle) or "angle" (c the vertex, a and b on each ray). Points are in image pixels from the top left, on the edges the dimension spans; label is a few words. Ask each dimension once, on one image. Ask the few that most change the shape first; ask more in later turns.`,
+    `- A dim with a number is the person's, in mm or degrees for an angle: measured on the object or meant on a sketch. It wins over the images. Never change or remove it. Remove your asked dims you no longer need.`,
   ].join("\n");
 }
 
@@ -640,8 +644,9 @@ export async function serve(o: {
         let photo = photoName ? readPhoto(photoName) : undefined;
         if (photoName && !photo) return json(res, { error: "That image is no longer in the project." }, 400);
         if (!entry && !photo) return json(res, { error: "Open a file first" }, 409);
+        const added = (Array.isArray(b.photos) ? b.photos : []).filter((name: unknown) => readPhoto(name)) as string[];
         const text = String(b.text ?? "").trim();
-        if (!text && !photo) return json(res, { error: "Feedback needs text" }, 400);
+        if (!text && !photo && !added.length) return json(res, { error: "Feedback needs text" }, 400);
         if (photo && Array.isArray(b.photo.dims)) {
           photo = { ...photo, dims: cleanDims(b.photo.dims) };
           writeFileSync(photoJson(photoName!), JSON.stringify(photo, null, 2) + "\n");
@@ -654,7 +659,13 @@ export async function serve(o: {
         // Described now: the model may be a different file by the time the turn starts.
         const feedback: Feedback = { text, refs: entry ? refs.map(describeRef) : [] };
         if (entry) feedback.entry = entry;
-        if (photo) feedback.photo = photoPrompt(photoName!, photo);
+        if (photo || added.length) {
+          // Every image of the file goes along: they show one object from different sides.
+          const file = photo ? photo.entry : entry;
+          const photos = listPhotos().filter((x) => x.name === photoName || added.includes(x.name) || (file && x.entry === file))
+            .map(({ name }) => ({ name, p: name === photoName ? photo! : readPhoto(name)! })).filter((x) => x.p);
+          feedback.photo = photoPrompt(file, photos, photoName, added);
+        }
         const pose = Object.entries(b.pose ?? {}).filter(([, v]) => Number.isFinite(v)).map(([j, v]) => `${j}=${v}`);
         if (pose.length) feedback.pose = pose.join(",");
         if (typeof b.screenshot === "string" && b.screenshot.startsWith("data:image/png;base64,")) {
@@ -663,7 +674,9 @@ export async function serve(o: {
           writeFileSync(feedback.screenshot, Buffer.from(b.screenshot.slice(22), "base64"));
         }
         queue.push(feedback);
-        say({ role: "user", kind: "text", text: text || (photo!.dims.length ? `Dimensions on ${photoName}` : `Model from ${photoName}`), refs: refs.length });
+        const said = text
+          || (added.length ? `Model from ${added.length === 1 ? added[0] : `${added.length} images`}` : `Dimensions on ${photoName}`);
+        say({ role: "user", kind: "text", text: said, refs: refs.length });
         status();
         void flush();
         return json(res, { ok: true });
