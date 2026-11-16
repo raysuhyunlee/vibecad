@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import updater from "electron-updater";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 // The window loads vibecad://app/, and every request goes to the server's socket, so no port can clash.
@@ -86,6 +87,34 @@ function open() {
   win.loadURL(`${ORIGIN}/`);
 }
 
+// How often a running app looks for a newer release.
+const UPDATE_CHECK_MS = 4 * 60 * 60 * 1000;
+
+/** Downloads newer GitHub releases in the background, and offers a restart once one is ready. */
+function watchUpdates() {
+  if (!app.isPackaged) return;
+  const { autoUpdater } = updater;
+  // An offline machine or a missing release is not the person's problem.
+  autoUpdater.on("error", (e) => console.error("update check failed:", e.message));
+  autoUpdater.on("update-downloaded", async ({ version }) => {
+    const r = await dialog.showMessageBox(win, {
+      type: "info",
+      message: `Vibecad ${version} is ready`,
+      detail: "Restart now to update, or it installs when you quit.",
+      buttons: ["Restart", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (r.response !== 0) return;
+    // The server's exit on the way out must not show the crash dialog.
+    quitting = true;
+    autoUpdater.quitAndInstall();
+  });
+  const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  check();
+  setInterval(check, UPDATE_CHECK_MS);
+}
+
 // One app at a time: a second launch shows the open window.
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
@@ -96,6 +125,7 @@ else {
   app.whenReady().then(() => {
     protocol.handle("vibecad", forward);
     start();
+    watchUpdates();
   });
 }
 app.on("window-all-closed", () => app.quit());

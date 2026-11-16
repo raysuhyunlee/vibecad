@@ -140,7 +140,10 @@
 - the server stopping, or failing to start, shows an error and quits the desktop app
 - `.vibecad/dev.json` records the server's socket, so `vibecad show` reaches it
 - the desktop app reads PATH from the login shell, so the agent CLIs are found when started from Finder; builds and the agent run vibecad's CLI on the app's own Node, with `ELECTRON_RUN_AS_NODE`
-- `just build` packages the desktop app into `dist/` for this OS; `--mac --win --linux` pick others; macOS gets a dmg, signed and notarized when `.env` holds the keys (see `.env.example`), with the microphone entitlement voice needs; Windows and Linux stay unsigned folders
+- `just build` packages the desktop app into `dist/` for this OS; `--mac --win --linux` pick others; macOS gets a dmg and a zip, signed and notarized when `.env` holds the keys (see `.env.example`), with the microphone entitlement voice needs; Windows gets an unsigned NSIS installer; Linux stays an unsigned folder
+- work lands on `dev`; a pull request merges it to `main`; CI tests and typechecks both
+- a `v<version>` tag on `main`, matching `package.json`, makes CI build macOS (signed and notarized from repo secrets) and Windows and upload them to a draft GitHub release of `raysuhyunlee/vibecad`; publishing the draft ships the update
+- the packaged app checks GitHub releases at start and every 4 hours, downloads a newer one in the background, and offers a restart; declined, it installs on quit; a failed check is only logged. macOS updates from the zip, Windows from the installer
 - the person opens a project root with the desktop app's own folder dialog; where the folder cannot be opened, an in-app folder picker says why
 - opening a project runs its TypeScript in a build process, so only the person's own action opens one
 - one app serves one project: the server's working directory is the root, and builds, agents and `.vibecad/` resolve against it
@@ -278,3 +281,4 @@
 - 2026-11-16: add the `knurl` primitive, built face by face
 - 2026-11-16: package the app as an Electron desktop app, served over a local socket
 - 2026-11-17: drop the browser app; voice runs locally with Whisper
+- 2026-11-17: update the desktop app from GitHub releases; Windows gets an installer

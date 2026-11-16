@@ -33,10 +33,14 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "node_modules/three/examples/jsm", "to": "app/node_modules/three/examples/jsm" }
+      {
+        "from": "node_modules/three/examples/jsm",
+        "to": "app/node_modules/three/examples/jsm"
+      }
     ],
+    "publish": { "provider": "github", "owner": "raysuhyunlee", "repo": "vibecad" },
     "mac": {
-      "target": "dmg",
+      "target": ["dmg", "zip"],
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
       "entitlements": "app/entitlements.mac.plist",
@@ -46,7 +50,7 @@
       }
     },
     "win": {
-      "target": "dir"
+      "target": "nsis"
     },
     "linux": {
       "target": "dir"
@@ -54,6 +58,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.2",
+    "electron-updater": "6.8.11",
     "occt-wasm": "5.16.0",
     "three": "0.187.0"
   },
