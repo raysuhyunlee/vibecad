@@ -27,6 +27,7 @@
 - server: Node `http` with server-sent events, bound to 127.0.0.1
 - voice: browser Web Speech API
 - agents: `claude` and `codex` CLIs
+- desktop app: Electron, which runs `vibecad dev` on its own bundled Node and shows it in a window
 
 ## language
 
@@ -135,6 +136,12 @@
 ## app and projects
 
 - `vibecad dev` starts the app with nothing open; it takes no file
+- the desktop app runs `vibecad dev --socket <path>` as a child, on a local socket in its data folder instead of the port, and its window loads `vibecad://app/`, whose requests it passes to that socket; so it opens no port and clashes with no other app; one runs at a time
+- the server stopping, or failing to start, shows an error and quits the desktop app
+- `.vibecad/dev.json` records the server's port or socket, so `vibecad show` reaches either
+- the desktop app reads PATH from the login shell, so the agent CLIs are found when started from Finder; builds and the agent run vibecad's CLI on the app's own Node, with `ELECTRON_RUN_AS_NODE`
+- `just build` packages the desktop app into `dist/` for this OS; `--mac --win --linux` pick others, unsigned and without installers
+- voice uses the Web Speech API, which Electron does not back, so in the desktop app the person types
 - the person opens a project root with the OS's own folder dialog, shown by the local server (Finder, Explorer, or zenity or kdialog); where there is none, or the folder cannot be opened, an in-app folder picker stands in
 - opening a project runs its TypeScript in a build process, so only the person's own action opens one
 - one app serves one project: the server's working directory is the root, and builds, agents and `.vibecad/` resolve against it
@@ -269,3 +276,4 @@
 - 2026-11-12: add libraries of instances and factory folders, imported as `lib:` and `factory:`, with a built-in `std`
 - 2026-11-13: add reference images: the agent models a photo or sketch and asks for dimensions over it
 - 2026-11-16: add the `knurl` primitive, built face by face
+- 2026-11-16: package the app as an Electron desktop app, served over a local socket

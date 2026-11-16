@@ -2,6 +2,7 @@
 // Every command prints one JSON document to stdout, and exits non-zero on failure.
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { request } from "node:http";
 import { registerHooks } from "node:module";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -60,7 +61,8 @@ Commands that build also take --pose joint=value,other/joint=value.
                                  in all six views and iso, and prints what each number is
   export [entry] [--part p] --out file.step|file.stl
   diff <git-ref> [entry]         Compare the model with another revision
-  dev                            Start the app; open a project and file inside it.
+  dev [--socket path]            Start the app; open a project and file inside it.
+                                 --socket listens there instead of the port.
                                  Settings: ~/.vibecad/config.json
   show --part p [--face id] [--message text]
                                  Point at geometry in the open preview`;
@@ -366,6 +368,7 @@ async function main() {
       message: { type: "string" },
       pose: { type: "string" },
       labels: { type: "boolean" },
+      socket: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -385,6 +388,7 @@ async function main() {
     const config = loadConfig();
     return serve({
       ...config,
+      socket: o.socket,
       print,
     });
   }
@@ -482,12 +486,17 @@ setTimeout(() => { process.stdout.write(${JSON.stringify(JSON.stringify(error, n
 async function show(part?: string, face?: string, message?: string) {
   if (!part) throw new CadError("MISSING_PART", "show needs --part");
   if (!existsSync(DEV_FILE)) throw new CadError("NO_PREVIEW", "No preview has this project open. Run vibecad dev and open it in the app");
-  const { port } = JSON.parse(readFileSync(DEV_FILE, "utf8"));
-  const res = await fetch(`http://127.0.0.1:${port}/show`, {
-    method: "POST",
-    body: JSON.stringify({ part, face, message }),
+  const { port, socket } = JSON.parse(readFileSync(DEV_FILE, "utf8"));
+  // The desktop app listens on a socket, which fetch cannot reach.
+  const status = await new Promise<number>((done, reject) => {
+    const req = request({ socketPath: socket, host: "127.0.0.1", port, path: "/show", method: "POST" }, (res) => {
+      res.resume();
+      done(res.statusCode ?? 0);
+    });
+    req.on("error", reject);
+    req.end(JSON.stringify({ part, face, message }));
   });
-  print({ ok: res.ok });
+  print({ ok: status >= 200 && status < 300 });
 }
 
 /** Builds the same entry from another revision and compares by semantic face name. */

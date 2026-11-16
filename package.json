@@ -13,9 +13,20 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "main": "app/main.js",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "app": "electron ."
+  },
+  "build": {
+    "appId": "dev.vibecad.app",
+    "productName": "vibecad",
+    "asar": false,
+    "files": ["app/**", "src/**", "viewer/**", "libs/**", "factories/**", "package.json"],
+    "mac": { "target": "dir", "category": "public.app-category.developer-tools" },
+    "win": { "target": "dir" },
+    "linux": { "target": "dir" }
   },
   "dependencies": {
     "occt-wasm": "5.16.0",
@@ -24,6 +35,8 @@
   "devDependencies": {
     "@types/node": "26.6.6",
     "@types/three": "0.187.0",
+    "electron": "45.2.1",
+    "electron-builder": "26.18.0",
     "typescript": "7.0.2"
   }
 }

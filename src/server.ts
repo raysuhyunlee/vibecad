@@ -189,6 +189,8 @@ function listFiles() {
 
 export async function serve(o: {
   port: number;
+  /** The desktop app's local socket, in place of the port: only the app reaches it, so no other app's port can clash. */
+  socket?: string;
   agent: string;
   model?: string;
   print: (v: unknown) => void;
@@ -396,7 +398,7 @@ export async function serve(o: {
     queue.length = 0;
     ensureDir(".vibecad");
     writeFileSync(".vibecad/.gitignore", "*\n");
-    writeFileSync(DEV_FILE, JSON.stringify({ port: o.port }));
+    writeFileSync(DEV_FILE, JSON.stringify(o.socket ? { socket: o.socket } : { port: o.port }));
     project = listFiles();
     watcher?.close();
     watcher = watch(".", { recursive: true }, (_event, file) => {
@@ -481,6 +483,8 @@ export async function serve(o: {
 
   /** Blocks other websites from driving the agent through this local server. */
   const trusted = (req: IncomingMessage) => {
+    // No website can reach a local socket.
+    if (o.socket) return true;
     const hosts = [`127.0.0.1:${o.port}`, `localhost:${o.port}`];
     if (!hosts.includes(req.headers.host ?? "")) return false;
     const origin = req.headers.origin;
@@ -730,8 +734,12 @@ export async function serve(o: {
     });
     process.exit(1);
   });
-  server.listen(o.port, "127.0.0.1", () => {
-    o.print({ ok: true, url: `http://127.0.0.1:${o.port}`, agent: o.agent });
-  });
+  if (o.socket) {
+    // A socket file left by a crashed app would block the listen.
+    if (process.platform !== "win32") rmSync(o.socket, { force: true });
+    server.listen(o.socket, () => o.print({ ok: true, socket: o.socket, agent: o.agent }));
+  } else {
+    server.listen(o.port, "127.0.0.1", () => o.print({ ok: true, url: `http://127.0.0.1:${o.port}`, agent: o.agent }));
+  }
   await new Promise(() => {});
 }

@@ -47,8 +47,13 @@ function short(input: unknown) {
   return String(o.command ?? o.file_path ?? o.path ?? o.pattern ?? "").replace(process.cwd() + "/", "").slice(0, 160);
 }
 
+const quote = (p: string) => (/\s/.test(p) ? JSON.stringify(p) : p);
+/** In the desktop app the agent runs the CLI on the app's own Node, so it needs no Node of its own. */
 export function cliCommand() {
-  return `node ${/\s/.test(CLI) ? JSON.stringify(CLI) : CLI}`;
+  if (!process.versions.electron) return `node ${quote(CLI)}`;
+  // The agent inherits ELECTRON_RUN_AS_NODE; the prefix keeps it when a shell drops it.
+  const run = `${quote(process.execPath)} ${quote(CLI)}`;
+  return process.platform === "win32" ? run : `ELECTRON_RUN_AS_NODE=1 ${run}`;
 }
 
 /** What the person said in one prompt: the prompt quotes each message as JSON. */

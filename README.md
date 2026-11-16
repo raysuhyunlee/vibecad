@@ -9,6 +9,8 @@ Needs Node 24+. Feedback needs a logged-in `claude` or `codex` CLI.
 ```bash
 npm install
 node src/cli.ts dev   # open the printed URL
+npm run app           # or run it as a desktop app
+just build            # package the desktop app into dist/
 ```
 
 Open a project folder in the app, for example `examples/servo-bracket`, and pick a file. Click faces or edges to measure them. Press `D` for the pen, click a face to pin it, then hold Space and talk, or type. `F` fits, `Esc` clears.
