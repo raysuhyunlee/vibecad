@@ -30,11 +30,14 @@
 
 ## language
 
-- primitives: `box cylinder cone sphere knurl extrude revolve sweep loft`
+- primitives: `box cylinder cone sphere knurl thread extrude revolve sweep loft`
 - placement: `box` is centered on XY with its base at z=0, not centered on z; `cylinder` and `cone` stand on z=0 about +z; `sphere` is centered on the origin
 - cost: each boolean is a full kernel operation, so hundreds of cuts one by one can take minutes or run out of memory; combine tool bodies into one first, or build a pattern another way
 - `knurl(radius, height, { pitch, depth, pattern, angle })` is a knurled cylinder placed like `cylinder`, with `radius` over the crests and faces `side top bottom`; `pattern` is `diamond` (grooves at +-`angle` from the axis, default 30), `pyramid` (grooves along and around the axis) or `straight`
 - a knurl is built from flat faces between crests and groove crossings, with no booleans, so it takes well under a second; the tooth count around and the row count up are rounded to whole numbers, so the pitch and a diamond's angle shift slightly to fit, and a pyramid's ends lie on a ring groove
+- `thread(radius, height, { pitch, depth, left })` is a threaded rod with 60 degree flanks placed like `cylinder`, with `radius` over the crests, flat ends and faces `side top bottom`; `depth` defaults to 0.5413 x `pitch`; cut it from a part to tap a hole, with `radius` the hole's major radius
+- a thread is built from flat triangles like a knurl, because the kernel silently fails to cut a swept helix where it crosses a coaxial cylinder; renders draw every triangle edge, so a thread looks dark
+- a `cut` that removes no volume fails with `CUT_NO_EFFECT`
 - import: `importStep(file)` loads a STEP file as a solid, with its path relative to the calling source file
 - an imported file has no feature names, so its faces are `<feature>.face[i]` in file order; replacing the file can renumber them, so prefer selecting the whole feature, `edges.of("motor").curve("circle")`
 - STEP files are tracked in git, because `diff` builds revisions from git; saving one in the project rebuilds

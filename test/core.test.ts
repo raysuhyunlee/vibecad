@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   assembly, box, check, circle, closedSpline, cone, cylinder, edges, extrude, helix, importStep, knurl, loft, mate, minClearance, noCollision, offset, onFace, outerTangent, part, path,
-  plane, polygon, port, rect, revolute, revolve, roundedRect, slider, sphere, spine, sweep, world,
+  plane, polygon, port, rect, revolute, revolve, roundedRect, slider, sphere, spine, sweep, thread, world,
 } from "../src/index.ts";
 import { build, CadError, getKernel, type KeptFeature, type PartStore } from "../src/eval.ts";
 import type { Vec3 } from "../src/lang.ts";
@@ -854,4 +854,17 @@ test("a knurl builds face by face in each pattern, named like a cylinder", async
     assert.deepEqual([...kinds].sort(), ["k.bottom", "k.side", "k.top"], pattern);
   }
   await assert.rejects(build(part("P", () => knurl(2, 5, { pitch: 1, depth: 3 }))()), (e: CadError) => e.code === "BAD_KNURL");
+});
+
+test("a thread builds face by face, and taps a bored hole that a swept helix cannot", async () => {
+  const rod = await facesOf(thread(5, 6, { pitch: 1, depth: 0.5 }).named("t"));
+  const mid = Math.PI * 4.75 ** 2 * 6;
+  closeTo(rod.volume / mid, 1, 2e-3);
+  assert.deepEqual([...new Set(rod.faces.map((f) => f.id.replace(/~\d+$/, "")))].sort(), ["t.bottom", "t.side", "t.top"]);
+  const ring = () => cylinder(8, 4).cut([cylinder(4.6, 6).translate(0, 0, -1).named("bore")]).named("ring");
+  const tapped = await facesOf(ring().cut([thread(5, 6, { pitch: 1, depth: 0.5 }).translate(0, 0, -1).named("tap")]));
+  const plain = await facesOf(ring());
+  assert.ok(plain.volume - tapped.volume > Math.PI * (4.75 ** 2 - 4.6 ** 2) * 4 * 0.9);
+  const groove = sweep(polygon([[-0.2, -0.4], [0.5, -0.05], [0.5, 0.05], [-0.2, 0.4]]), helix(4.6, 1, 5)).named("groove");
+  await assert.rejects(build(part("P", () => ring().cut([groove]))()), (e: CadError) => e.code === "CUT_NO_EFFECT");
 });

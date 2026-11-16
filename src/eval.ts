@@ -322,8 +322,8 @@ class Evaluator {
   }
 
   isCap(n: Solid, f: ShapeHandle) {
-    if (n.op === "knurl") {
-      // Every knurl face is flat; only the ends lie in z=0 and z=height.
+    if (n.op === "knurl" || n.op === "thread") {
+      // Every knurl or thread face is flat; only the ends lie in z=0 and z=height.
       const z = this.k.getSurfaceCenterOfMass(f).z, h = (n.args as { height: number }).height;
       return Math.abs(z) < 1e-6 || Math.abs(z - h) < 1e-6;
     }
@@ -381,6 +381,74 @@ class Evaluator {
       }
     }
     faces.push(...ends.map(face));
+    const solid = k.sewAndSolidify(faces, 1e-7);
+    this.sound(n, solid, "Check that depth is small against the radius and the pitch.");
+    return solid;
+  }
+
+  /**
+   * A thread built face by face, with no booleans, since the kernel cannot cut a swept helix where it crosses a
+   * coaxial cylinder. Columns run up the axis at even angles. Each holds the profile's corners, which climb one
+   * pitch per turn, plus a point on each end. Flat triangles join neighboring columns along the corner lines.
+   */
+  thread(n: Solid, a: { radius: number; height: number; pitch: number; depth: number; left: boolean }) {
+    const k = this.k, { radius: r, height: h, pitch: p, depth } = a;
+    const bad = (msg: string) => new CadError("BAD_THREAD", msg, n.src);
+    if (!(r > 0 && h > 0 && p > 0)) throw bad("radius, height and pitch must be positive");
+    if (!(depth > 0 && depth < r && depth < 0.8 * p)) throw bad(`depth ${depth} must be positive, under the radius and under 0.8 x pitch`);
+    // 60 degree flanks; what is left of the pitch is split between the crest and root flats.
+    const flank = depth * Math.tan(Math.PI / 6), flat = (p - 2 * flank) / 2;
+    const corners = [0, flat, flat + flank, 2 * flat + flank];
+    const radiusAt = (u: number) => {
+      const t = ((u % p) + p) % p;
+      if (t <= flat) return r;
+      if (t <= flat + flank) return r - (depth * (t - flat)) / flank;
+      if (t <= 2 * flat + flank) return r - depth;
+      return r - depth + (depth * (t - 2 * flat - flank)) / flank;
+    };
+    // Columns close enough that a chord sags under 0.01 from the crest circle.
+    const cols = Math.max(24, Math.ceil(Math.PI / Math.acos(1 - Math.min(0.01 / r, 1))));
+    // A corner this close to an end is dropped, so no face is a sliver.
+    const eps = 0.01 * p;
+    type Pt = { key: number; v: ShapeHandle };
+    const point = (t: number, z: number, u: number) => {
+      const rr = radiusAt(u);
+      return k.makeVertex(rr * Math.cos(t), rr * Math.sin(t), z);
+    };
+    const columns: Pt[][] = [];
+    for (let i = 0; i < cols; i++) {
+      const t = ((a.left ? -2 : 2) * Math.PI * i) / cols, rise = (p * i) / cols;
+      const col: Pt[] = [{ key: -Infinity, v: point(t, 0, -rise) }];
+      for (let c = -8; ; c++) {
+        const u = Math.floor(c / 4) * p + corners[((c % 4) + 4) % 4]!, z = u + rise;
+        if (z >= h - eps) break;
+        if (z > eps) col.push({ key: c, v: point(t, z, u) });
+      }
+      col.push({ key: Infinity, v: point(t, h, h - rise) });
+      columns.push(col);
+    }
+    // After a full turn the corners have climbed one pitch: corner c there is corner c + 4 of the first column.
+    columns.push(columns[0]!.map((q) => ({ key: Number.isFinite(q.key) ? q.key - 4 : q.key, v: q.v })));
+    const face = (vs: ShapeHandle[]) => k.makeFace(k.makeWire(vs.map((v, i) => k.makeEdge(v, vs[(i + 1) % vs.length]!))));
+    const faces: ShapeHandle[] = [];
+    for (let i = 0; i < cols; i++) {
+      const A = columns[i]!, B = columns[i + 1]!;
+      let x = 0, y = 0;
+      while (x < A.length - 1 || y < B.length - 1) {
+        const na = A[x + 1]?.key, nb = B[y + 1]?.key;
+        if (na !== undefined && na === nb) {
+          faces.push(face([A[x]!.v, B[y]!.v, B[y + 1]!.v]), face([A[x]!.v, B[y + 1]!.v, A[x + 1]!.v]));
+          x++, y++;
+        } else if (nb === undefined || (na !== undefined && na < nb)) {
+          faces.push(face([A[x]!.v, B[y]!.v, A[x + 1]!.v]));
+          x++;
+        } else {
+          faces.push(face([A[x]!.v, B[y]!.v, B[y + 1]!.v]));
+          y++;
+        }
+      }
+    }
+    faces.push(face(columns.slice(0, cols).map((c) => c[0]!.v)), face(columns.slice(0, cols).map((c) => c.at(-1)!.v)));
     const solid = k.sewAndSolidify(faces, 1e-7);
     this.sound(n, solid, "Check that depth is small against the radius and the pitch.");
     return solid;
@@ -580,6 +648,8 @@ class Evaluator {
         return this.primitive(n, k.makeSphere(a.radius));
       case "knurl":
         return this.primitive(n, this.knurl(n, a));
+      case "thread":
+        return this.primitive(n, this.thread(n, a));
       case "extrude":
         return this.onPlane(n, this.swept(n, a.profile, [a.height > 0 ? "bottom" : "top", a.height > 0 ? "top" : "bottom"], (f) =>
           k.extrudeWithHistory(f, 0, 0, a.height, [], HASH_BOUND)), this.sketchPlane(n, a.on));
@@ -612,6 +682,13 @@ class Evaluator {
         });
         if (this.faces(ev.result).length === 0) {
           throw new CadError("EMPTY_RESULT", `${n.op} produced no geometry`, n.src, hintFor(n));
+        }
+        // The kernel can fail a cut silently, splitting faces but removing nothing.
+        if (n.op === "cut" && k.getVolume(first.shape) - k.getVolume(ev.result) < 1e-9 * k.getVolume(first.shape)) {
+          throw new CadError(
+            "CUT_NO_EFFECT", "cut removed nothing", n.src,
+            "Check that the tools overlap the body. A swept helix crossing a coaxial cylinder fails in the kernel; use thread() instead.",
+          );
         }
         return this.track(n, ev.result, ev, inputs);
       }

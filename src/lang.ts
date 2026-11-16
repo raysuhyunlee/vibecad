@@ -405,7 +405,7 @@ let nextId = 1;
 let opCounts = new Map<string, number>();
 
 export type OpName =
-  | "box" | "cylinder" | "cone" | "sphere" | "knurl" | "extrude" | "revolve" | "sweep" | "loft" | "importStep"
+  | "box" | "cylinder" | "cone" | "sphere" | "knurl" | "thread" | "extrude" | "revolve" | "sweep" | "loft" | "importStep"
   | "union" | "cut" | "intersect"
   | "fillet" | "chamfer" | "shell"
   | "translate" | "rotate" | "mirror";
@@ -509,6 +509,13 @@ export function knurl(
   opts: { pitch: number; depth: number; pattern?: KnurlPattern; angle?: number },
 ): Solid {
   return new Solid("knurl", { radius, height, pitch: opts.pitch, depth: opts.depth, pattern: opts.pattern ?? "diamond", angle: opts.angle ?? 30 }, []);
+}
+/**
+ * A threaded rod with 60 degree flanks: radius over the crests, axis on Z, base at z=0, flat ends. Faces: side, top, bottom.
+ * depth is crest to root, 5/8 of the sharp-V height by default. Cut it from a part to tap a hole: radius is then the hole's major radius.
+ */
+export function thread(radius: number, height: number, opts: { pitch: number; depth?: number; left?: boolean }): Solid {
+  return new Solid("thread", { radius, height, pitch: opts.pitch, depth: opts.depth ?? 0.5413 * opts.pitch, left: opts.left ?? false }, []);
 }
 /** A sketch plane. The sketch's x lies along x, its y along z cross x, and sweeps go along +z. */
 export interface Plane {
