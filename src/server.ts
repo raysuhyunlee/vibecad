@@ -284,8 +284,9 @@ export async function serve(o: {
     emit({ type: "entry", ...entryState() }); // the viewer shows the build running
     let out = "";
     child.stdout.on("data", (d) => (out += d));
-    child.on("close", (_code, signal) => {
-      if (signal || building !== child) return;
+    child.on("close", () => {
+      // The server forgets a build before it stops one; a build stopped by its own timeout still reports.
+      if (building !== child) return;
       building = buildingFile = undefined;
       const tab = tabs.get(file);
       if (!tab) return;

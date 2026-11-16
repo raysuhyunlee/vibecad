@@ -31,6 +31,8 @@
 ## language
 
 - primitives: `box cylinder cone sphere extrude revolve sweep loft`
+- placement: `box` is centered on XY with its base at z=0, not centered on z; `cylinder` and `cone` stand on z=0 about +z; `sphere` is centered on the origin
+- cost: each boolean is a full kernel operation, so hundreds of cuts one by one can take minutes or run out of memory; combine tool bodies into one first, or build a pattern another way, such as intersecting two grooved bodies for a knurl
 - import: `importStep(file)` loads a STEP file as a solid, with its path relative to the calling source file
 - an imported file has no feature names, so its faces are `<feature>.face[i]` in file order; replacing the file can renumber them, so prefer selecting the whole feature, `edges.of("motor").curve("circle")`
 - STEP files are tracked in git, because `diff` builds revisions from git; saving one in the project rebuilds
@@ -100,6 +102,7 @@
 - `build test query render export diff dev show`, see `vibecad --help`
 - `--pose joint=value,...` sets joint values for any command that builds, except `diff` and `dev`
 - `build` writes the file's kept build; a posed build is not the source's instance, so it goes to `.vibecad/out`
+- a command that builds stops after 30 seconds with `BUILD_TIMEOUT`, or `VIBECAD_BUILD_TIMEOUT` seconds; a watcher process keeps the time, since the kernel blocks the build's own
 
 ## builds
 

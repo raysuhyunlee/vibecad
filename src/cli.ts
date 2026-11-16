@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Every command prints one JSON document to stdout, and exits non-zero on failure.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -368,6 +368,7 @@ async function main() {
   if (cmd === "show") return show(o.part, o.face, o.message);
 
   const pose = parsePose(o.pose);
+  watchdog(Number(process.env.VIBECAD_BUILD_TIMEOUT) || 30);
   const { out, root, file } = await buildEntry(entry, { stepMeshes: !!o.steps, pose, sweeps: cmd === "test" });
   const k = await getKernel();
 
@@ -431,6 +432,27 @@ async function main() {
     default:
       throw new CadError("UNKNOWN_COMMAND", `Unknown command "${cmd}"`, undefined, USAGE);
   }
+}
+
+/**
+ * Stops a runaway build. The kernel blocks this process's event loop, so a separate process
+ * keeps the time: it prints the failure as this command's output and kills it, and it ends
+ * on its own when this process ends and closes its stdin.
+ */
+function watchdog(seconds: number) {
+  const error = {
+    ok: false,
+    error: {
+      code: "BUILD_TIMEOUT",
+      message: `The command took over ${seconds}s and was stopped`,
+      hint: "Too many boolean operations or too fine a pattern. Combine tool bodies before cutting, or build the pattern another way. VIBECAD_BUILD_TIMEOUT sets the limit in seconds",
+    },
+  };
+  const script = `process.stdin.on("end", () => process.exit()).resume();
+setTimeout(() => { process.stdout.write(${JSON.stringify(JSON.stringify(error, null, 2) + "\n")}); try { process.kill(${process.pid}, "SIGKILL"); } catch {} process.exit(); }, ${seconds * 1000});`;
+  const child = spawn(process.execPath, ["-e", script], { stdio: ["pipe", "inherit", "ignore"] });
+  child.unref();
+  (child.stdin as unknown as { unref(): void }).unref();
 }
 
 /** Asks the running preview to highlight geometry for the human. */
