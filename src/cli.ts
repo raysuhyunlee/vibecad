@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { build, CadError, FEATURES_VERSION, getKernel, type BuildOutput, type KeptFeature, type MeshData, type Model, type PartBuild, type PartStore } from "./eval.ts";
 import { ABSENT, buildDir, digest, ensureDir, isFresh, resolveShelf, sharedBuildDir, shadows, toolDigest, type BuildInputs } from "./fs.ts";
+import type { ShapeHandle } from "occt-wasm";
 import { isInstance, originOf, STEP_FILE, stepEntry, type Instance, type Solid } from "./lang.ts";
 
 // The project's modules as they load: each file's content digest, and what each imports.
@@ -331,6 +332,28 @@ function pick(out: BuildOutput, part?: string) {
   return getKernel().then((k) => k.makeCompound([...out.shapes.values()]));
 }
 
+/** STEP with names: one part named by its path, or an assembly named `top` with a component per part path. */
+function namedStep(k: Awaited<ReturnType<typeof getKernel>>, out: BuildOutput, top: string, part?: string) {
+  const entries: [string, ShapeHandle][] = part ? [[part, out.shapes.get(part)!]] : [...out.shapes];
+  const doc = k.createXCAFDocument();
+  try {
+    const [first] = entries;
+    if (entries.length === 1 && first) {
+      doc.addShape(first[1], { name: first[0] || top });
+    } else {
+      const asm = doc.addShape(k.makeCompound(entries.map(([, s]) => s)), { assembly: true, name: top });
+      doc.getChildren(asm).forEach((c, i) => {
+        const name = entries[i]?.[0] ?? "";
+        doc.setName(c, name);
+        doc.setName(doc.getReferredLabel(c) ?? c, name);
+      });
+    }
+    return doc.exportSTEP();
+  } finally {
+    doc.close();
+  }
+}
+
 async function main() {
   const { values: o, positionals } = parseArgs({
     allowPositionals: true,
@@ -424,7 +447,7 @@ async function main() {
       if (!o.out) throw new CadError("MISSING_OUT", "export needs --out file.step or file.stl");
       const shape = await pick(out, o.part);
       if (o.out.endsWith(".stl")) writeFileSync(o.out, k.exportStl(shape));
-      else if (STEP_FILE.test(o.out)) writeFileSync(o.out, k.exportStep(shape));
+      else if (STEP_FILE.test(o.out)) writeFileSync(o.out, namedStep(k, out, root.typeName, o.part));
       else throw new CadError("BAD_FORMAT", "Use a .step, .stp or .stl file name");
       print({ ok: true, file: o.out });
       return;
