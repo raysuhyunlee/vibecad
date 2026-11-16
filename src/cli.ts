@@ -408,14 +408,14 @@ async function main() {
       const shape = await pick(out, o.part);
       const file = o.out ?? `${OUT_DIR}/render.png`;
       ensureDir(resolve(file, ".."));
+      const { render, renderLabeled } = await import("./render.ts");
       if (o.labels) {
-        const { renderLabeled } = await import("./render.ts");
         const { png, labels, unseen } = await renderLabeled(k, shape, out, o.part);
         writeFileSync(file, png);
         print({ ok: true, file, labels, unseen });
         return;
       }
-      writeFileSync(file, await k.toMultiviewPNG(shape));
+      writeFileSync(file, render(k, shape, out, o.part));
       print({ ok: true, file });
       return;
     }

@@ -23,7 +23,7 @@
 
 - cad language: TypeScript, run with Node type stripping (Node 24+)
 - kernel: OCCT 8 via `occt-wasm` (exact version pinned, LGPL-2.1)
-- renderer: three.js in a local web page, no build step; agents use `vibecad render` (hidden-line PNG)
+- renderer: three.js in a local web page, no build step; agents use `vibecad render` (shaded PNG of the build's meshes)
 - server: Node `http` with server-sent events, bound to 127.0.0.1
 - voice: browser Web Speech API
 - agents: `claude` and `codex` CLIs
@@ -113,6 +113,7 @@
 - a feature's key is a digest of its op, name, arguments and inputs, and a loaded STEP file's content, but not its source line, so moving code keeps it; a kept face points at the line of the feature that made it in the current source
 - `features.json` holds only the features of the part's last build, and records `FEATURES_VERSION` in `src/eval.ts` with the kernel version; from another version it is ignored and the part builds from scratch
 - bump `FEATURES_VERSION` with any change to evaluation that can change a feature's solid or face names, or stale geometry is reused
+- `render` shades the build's meshes with a z-buffer and draws edges where the face or depth changes; it draws no hidden edges, since the kernel's exact hidden-line removal took minutes per view on swept threads
 - `render --labels` draws all six views and iso with a number on each face, and prints each number's part, face id and views, plus the faces no view can see
 - each face is tagged in the view that shows it best, moved aside with a leader line when crowded, and in other views where its tag fits
 - the PNG holds only numbers because the kernel's bitmap font lacks many letters; it reads the kernel package's layout and font files, so a kernel upgrade must recheck this
