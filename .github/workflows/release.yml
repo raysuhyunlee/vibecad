@@ -6,7 +6,16 @@ on:
 permissions:
   contents: write
 jobs:
+  # Uploads that each find no release create one apiece, so the draft exists before any build uploads.
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release view "$GITHUB_REF_NAME" || gh release create "$GITHUB_REF_NAME" --draft --title "${GITHUB_REF_NAME#v}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
   build:
+    needs: draft
     strategy:
       matrix:
         os: [macos-latest, windows-latest]
