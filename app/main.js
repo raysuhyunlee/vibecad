@@ -30,7 +30,7 @@ let quitting = false;
 function fail(message) {
   if (quitting) return;
   quitting = true;
-  dialog.showErrorBox("vibecad", message);
+  dialog.showErrorBox("Vibecad", message);
   app.quit();
 }
 
@@ -58,6 +58,11 @@ function start() {
 /** Passes one window request to the server's socket, streaming the answer so server-sent events flow. */
 async function forward(req) {
   const url = new URL(req.url);
+  // The folder dialog is the app's own, on its window.
+  if (req.method === "POST" && url.pathname === "/project/pick") {
+    const r = await dialog.showOpenDialog(win, { title: "Open project", properties: ["openDirectory", "createDirectory"] });
+    return Response.json({ path: r.canceled ? null : r.filePaths[0] ?? null });
+  }
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : Buffer.from(await req.arrayBuffer());
   return new Promise((done) => {
     const r = request({ socketPath: socket, path: url.pathname + url.search, method: req.method, headers: Object.fromEntries(req.headers) }, (res) => {
@@ -72,7 +77,7 @@ async function forward(req) {
 }
 
 function open() {
-  win = new BrowserWindow({ width: 1440, height: 900, title: "vibecad", backgroundColor: "#ffffff" });
+  win = new BrowserWindow({ width: 1440, height: 900, title: "Vibecad", backgroundColor: "#ffffff" });
   // Links leave the app for the person's browser.
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);

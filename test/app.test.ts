@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { request } from "node:http";
+import { Readable } from "node:stream";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
 const CLI = new URL("../src/cli.ts", import.meta.url).pathname;
-const PORT = 4300 + (process.pid % 500);
-const URL_BASE = `http://127.0.0.1:${PORT}`;
+const URL_BASE = "http://main";
 const root = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-app-")));
 const bare = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-bare-")));
 
@@ -18,12 +19,27 @@ writeFileSync(join(root, "parts/helper.ts"), "export const size = 1;\n");
 mkdirSync(join(root, "node_modules/x"), { recursive: true });
 writeFileSync(join(root, "node_modules/x/skip.cad.ts"), "export default 1;\n");
 
-/** Starts the app with its own home folder, and so its own config file. */
-function startApp(config: unknown) {
+/** An app's local socket, named for the test that starts it. */
+const sock = (name: string) =>
+  process.platform === "win32" ? `\\\\.\\pipe\\vibecad-test-${process.pid}-${name}` : join(tmpdir(), `vc-${process.pid}-${name}.sock`);
+
+/** fetch over an app's local socket: the URL's host names the socket. */
+function fetch(url: string, init: { method?: string; body?: string } = {}): Promise<Response> {
+  const u = new URL(url);
+  return new Promise((done, fail) => {
+    const r = request({ socketPath: sock(u.hostname), path: u.pathname + u.search, method: init.method ?? "GET" }, (res) =>
+      done(new Response(res.statusCode === 204 ? null : (Readable.toWeb(res) as ReadableStream), { status: res.statusCode })));
+    r.on("error", fail);
+    r.end(init.body);
+  });
+}
+
+/** Starts the app on socket `name`, with its own home folder, and so its own config file. */
+function startApp(config: unknown, name = "main") {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-home-")));
   mkdirSync(join(home, ".vibecad"));
   writeFileSync(join(home, ".vibecad/config.json"), JSON.stringify(config));
-  const child = spawn(process.execPath, [CLI, "dev"], {
+  const child = spawn(process.execPath, [CLI, "dev", "--socket", sock(name)], {
     cwd: bare,
     env: { ...process.env, HOME: home, USERPROFILE: home },
     stdio: ["ignore", "pipe", "ignore"],
@@ -31,7 +47,7 @@ function startApp(config: unknown) {
   child.on("close", () => rmSync(home, { recursive: true, force: true }));
   return Object.assign(child, { home });
 }
-const app = startApp({ port: PORT });
+const app = startApp({});
 await new Promise((ok) => app.stdout.once("data", ok));
 after(() => {
   app.kill();
@@ -226,8 +242,7 @@ test("a build stays on disk, and shows at once after a restart while it is fresh
   const source = (name: string) => `import { box, part } from "vibecad";\nexport default part("${name}", () => ({ solid: box(1, 1, 1).named("a"), ports: {} }))({});\n`;
   writeFileSync(join(small, "a.cad.ts"), source("A"));
   writeFileSync(join(small, "b.cad.ts"), source("B"));
-  const port = PORT + 1;
-  const base = `http://127.0.0.1:${port}`;
+  const base = "http://keep";
   const postTo = (path: string, body: unknown) => fetch(base + path, { method: "POST", body: JSON.stringify(body) });
   const shown = async (file: string) => {
     for (let i = 0; i < 100; i++) {
@@ -239,7 +254,7 @@ test("a build stays on disk, and shows at once after a restart while it is fresh
   };
   /** Starts the app, opens the project on `file`, and returns the status of /model right after. */
   const reopen = async (file: string, run: () => Promise<void>) => {
-    const app = startApp({ port });
+    const app = startApp({}, "keep");
     await new Promise((ok) => app.stdout.once("data", ok));
     try {
       await postTo("/project", { path: small, entry: file, tabs: ["a.cad.ts", "b.cad.ts"] });
@@ -275,11 +290,10 @@ test("stopping the app stops its running build", { skip: process.platform === "w
 Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60_000);
 export default part("S", () => box(1, 1, 1))();
 `);
-  const port = PORT + 7;
-  const running = startApp({ port });
+  const running = startApp({}, "slow");
   await new Promise((ok) => running.stdout.once("data", ok));
   try {
-    await fetch(`http://127.0.0.1:${port}/project`, { method: "POST", body: JSON.stringify({ path: slow, entry: "main.cad.ts" }) });
+    await fetch("http://slow/project", { method: "POST", body: JSON.stringify({ path: slow, entry: "main.cad.ts" }) });
     const children = () => spawnSync("pgrep", ["-P", String(running.pid)], { encoding: "utf8" }).stdout.trim().split("\n").filter(Boolean).map(Number);
     let build: number | undefined;
     for (let i = 0; i < 100 && build === undefined; i++) {
@@ -307,8 +321,8 @@ export default part("S", () => box(1, 1, 1))();
 });
 
 test("a bad setting stops the app and names the file", async () => {
-  for (const [config, text] of [[{ port: -1 }, "port"], [{ typo: 1 }, "typo"]] as const) {
-    const child = startApp(config);
+  for (const [config, text] of [[{ agent: 1 }, "agent"], [{ typo: 1 }, "typo"]] as const) {
+    const child = startApp(config, "bad");
     let out = "";
     child.stdout.on("data", (d) => (out += d));
     assert.equal(await new Promise((ok) => child.on("close", ok)), 1);

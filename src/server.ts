@@ -6,10 +6,10 @@ import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AgentRunner, cliCommand, INTRO } from "./agent.ts";
-import { CONFIG_FILE } from "./config.ts";
 import type { FaceInfo, Model } from "./eval.ts";
 import { buildDir, ensureDir, isFresh } from "./fs.ts";
 import { STEP_FILE } from "./lang.ts";
+import { loadVoice, transcribe, voiceReady } from "./voice.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(HERE, "cli.ts");
@@ -132,40 +132,6 @@ function inside(root: string, child: string) {
 const hiddenName = (name: string) => name.startsWith(".") || name === "node_modules";
 const expandHome = (path: string) => path.replace(/^~(?=$|[\\/])/, homedir());
 
-/** The OS's own folder dialog, tried in order; the first that exists runs. */
-function folderDialogs(start: string): string[][] {
-  if (process.platform === "darwin") {
-    return [["osascript", "-e", "on run argv", "-e", "activate", "-e",
-      'POSIX path of (choose folder with prompt "Open project" default location (POSIX file (item 1 of argv)))',
-      "-e", "end run", start]];
-  }
-  if (process.platform === "win32") {
-    return [["powershell", "-NoProfile", "-STA", "-Command",
-      "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; " +
-      "$d.SelectedPath = $env:VIBECAD_START; $d.UseDescriptionForTitle = $true; $d.Description = 'Open project'; " +
-      "if ($d.ShowDialog((New-Object System.Windows.Forms.Form -Property @{TopMost = $true})) -eq 'OK') { $d.SelectedPath }"]];
-  }
-  return [
-    ["zenity", "--file-selection", "--directory", "--title=Open project", `--filename=${join(start, "")}`],
-    ["kdialog", "--getexistingdirectory", start, "--title", "Open project"],
-  ];
-}
-
-/** Asks the person for a folder. `null` is a cancel; `undefined` means this OS has no dialog to show. */
-async function pickFolder(start: string): Promise<string | null | undefined> {
-  for (const [cmd, ...args] of folderDialogs(start)) {
-    const out = await new Promise<string | null | undefined>((done) => {
-      let text = "";
-      const child = spawn(cmd!, args, { env: { ...process.env, VIBECAD_START: start }, stdio: ["ignore", "pipe", "ignore"] });
-      child.stdout.on("data", (d) => (text += d));
-      child.on("error", () => done(undefined));
-      child.on("close", (code) => done(code === 0 && text.trim() ? text.trim() : null));
-    });
-    if (out !== undefined) return out;
-  }
-  return undefined;
-}
-
 /** The project's modeling files, breadth first, relative to the working directory. */
 function listFiles() {
   const files: string[] = [];
@@ -188,9 +154,8 @@ function listFiles() {
 }
 
 export async function serve(o: {
-  port: number;
-  /** The desktop app's local socket, in place of the port: only the app reaches it, so no other app's port can clash. */
-  socket?: string;
+  /** The desktop app's local socket: only the app reaches it, and no port can clash. */
+  socket: string;
   agent: string;
   model?: string;
   print: (v: unknown) => void;
@@ -398,7 +363,7 @@ export async function serve(o: {
     queue.length = 0;
     ensureDir(".vibecad");
     writeFileSync(".vibecad/.gitignore", "*\n");
-    writeFileSync(DEV_FILE, JSON.stringify(o.socket ? { socket: o.socket } : { port: o.port }));
+    writeFileSync(DEV_FILE, JSON.stringify({ socket: o.socket }));
     project = listFiles();
     watcher?.close();
     watcher = watch(".", { recursive: true }, (_event, file) => {
@@ -457,8 +422,8 @@ export async function serve(o: {
   };
 
   // --- HTTP -----------------------------------------------------------------
-  const readBody = (req: IncomingMessage) =>
-    new Promise<string>((ok, bad) => {
+  const readBytes = (req: IncomingMessage) =>
+    new Promise<Buffer>((ok, bad) => {
       let size = 0;
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => {
@@ -468,9 +433,10 @@ export async function serve(o: {
           req.destroy();
         } else chunks.push(c);
       });
-      req.on("end", () => ok(Buffer.concat(chunks).toString()));
+      req.on("end", () => ok(Buffer.concat(chunks)));
       req.on("error", bad);
     });
+  const readBody = async (req: IncomingMessage) => (await readBytes(req)).toString();
   const json = (res: ServerResponse, value: unknown, code = 200) => {
     res.writeHead(code, { "content-type": "application/json" });
     res.end(JSON.stringify(value));
@@ -481,19 +447,8 @@ export async function serve(o: {
     res.end(readFileSync(path));
   };
 
-  /** Blocks other websites from driving the agent through this local server. */
-  const trusted = (req: IncomingMessage) => {
-    // No website can reach a local socket.
-    if (o.socket) return true;
-    const hosts = [`127.0.0.1:${o.port}`, `localhost:${o.port}`];
-    if (!hosts.includes(req.headers.host ?? "")) return false;
-    const origin = req.headers.origin;
-    return !origin || hosts.some((h) => origin === `http://${h}`);
-  };
-
   const server = createServer(async (req, res) => {
     try {
-      if (!trusted(req)) return json(res, { error: "Forbidden" }, 403);
       const url = new URL(req.url ?? "/", "http://localhost");
       const path = url.pathname;
 
@@ -586,9 +541,19 @@ export async function serve(o: {
       }
 
       if (req.method !== "POST") return json(res, { error: "Method not allowed" }, 405);
-      if (path === "/project/pick") {
-        const picked = await pickFolder(root ? dirname(root) : homedir());
-        return picked === undefined ? json(res, { error: "No folder dialog on this system" }, 501) : json(res, { path: picked });
+      if (path === "/voice/load") {
+        loadVoice().catch(() => {});
+        return json(res, { ready: voiceReady() });
+      }
+      if (path === "/voice") {
+        // The window sends 16 kHz mono samples as raw 32-bit floats.
+        const b = await readBytes(req);
+        const audio = new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + (b.length & ~3)));
+        try {
+          return json(res, { words: await transcribe(audio, url.searchParams.get("lang") ?? "en") });
+        } catch (e) {
+          return json(res, { error: e instanceof Error ? e.message : String(e) }, 500);
+        }
       }
       if (path === "/project") {
         const b = JSON.parse(await readBody(req));
@@ -730,16 +695,12 @@ export async function serve(o: {
   server.on("error", (e: NodeJS.ErrnoException) => {
     o.print({
       ok: false,
-      error: { code: e.code, message: e.code === "EADDRINUSE" ? `Port ${o.port} is in use. Set another "port" in ${CONFIG_FILE}.` : e.message },
+      error: { code: e.code, message: e.message },
     });
     process.exit(1);
   });
-  if (o.socket) {
-    // A socket file left by a crashed app would block the listen.
-    if (process.platform !== "win32") rmSync(o.socket, { force: true });
-    server.listen(o.socket, () => o.print({ ok: true, socket: o.socket, agent: o.agent }));
-  } else {
-    server.listen(o.port, "127.0.0.1", () => o.print({ ok: true, url: `http://127.0.0.1:${o.port}`, agent: o.agent }));
-  }
+  // A socket file left by a crashed app would block the listen.
+  if (process.platform !== "win32") rmSync(o.socket, { force: true });
+  server.listen(o.socket, () => o.print({ ok: true, socket: o.socket, agent: o.agent }));
   await new Promise(() => {});
 }

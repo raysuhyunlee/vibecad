@@ -25,7 +25,7 @@
 - kernel: OCCT 8 via `occt-wasm` (exact version pinned, LGPL-2.1)
 - renderer: three.js in a local web page, no build step; agents use `vibecad render` (shaded PNG of the build's meshes)
 - server: Node `http` with server-sent events, bound to 127.0.0.1
-- voice: browser Web Speech API
+- voice: Whisper small, run locally with transformers.js
 - agents: `claude` and `codex` CLIs
 - desktop app: Electron, which runs `vibecad dev` on its own bundled Node and shows it in a window
 
@@ -130,19 +130,18 @@
 ## settings
 
 - `~/.vibecad/config.json`, per user because the app starts before any project opens; read when the app starts
-- `port` (4173), `agent` (`claude`), `model` (agent default)
+- `agent` (`claude`), `model` (agent default)
 - every key is optional; an unknown key or a bad value stops the app with an error
 
 ## app and projects
 
-- `vibecad dev` starts the app with nothing open; it takes no file
-- the desktop app runs `vibecad dev --socket <path>` as a child, on a local socket in its data folder instead of the port, and its window loads `vibecad://app/`, whose requests it passes to that socket; so it opens no port and clashes with no other app; one runs at a time
+- the desktop app is the only way to run the app; it starts with nothing open
+- the desktop app runs `vibecad dev --socket <path>` as a child, on a local socket in its data folder, and its window loads `vibecad://app/`, whose requests it passes to that socket; so it opens no port and clashes with no other app; one runs at a time; `dev` takes no file
 - the server stopping, or failing to start, shows an error and quits the desktop app
-- `.vibecad/dev.json` records the server's port or socket, so `vibecad show` reaches either
+- `.vibecad/dev.json` records the server's socket, so `vibecad show` reaches it
 - the desktop app reads PATH from the login shell, so the agent CLIs are found when started from Finder; builds and the agent run vibecad's CLI on the app's own Node, with `ELECTRON_RUN_AS_NODE`
-- `just build` packages the desktop app into `dist/` for this OS; `--mac --win --linux` pick others, unsigned and without installers
-- voice uses the Web Speech API, which Electron does not back, so in the desktop app the person types
-- the person opens a project root with the OS's own folder dialog, shown by the local server (Finder, Explorer, or zenity or kdialog); where there is none, or the folder cannot be opened, an in-app folder picker stands in
+- `just build` packages the desktop app into `dist/` for this OS; `--mac --win --linux` pick others; macOS gets a dmg, signed and notarized when `.env` holds the keys (see `.env.example`), with the microphone entitlement voice needs; Windows and Linux stay unsigned folders
+- the person opens a project root with the desktop app's own folder dialog; where the folder cannot be opened, an in-app folder picker says why
 - opening a project runs its TypeScript in a build process, so only the person's own action opens one
 - one app serves one project: the server's working directory is the root, and builds, agents and `.vibecad/` resolve against it
 - the left panel lists the root's `*.cad.ts` and STEP files, skipping dot folders and `node_modules`, and updates as files change
@@ -166,7 +165,7 @@
 - a view cube in the corner turns with the camera and shows the world axes; side labels read upright with +Z up, top and bottom with +Y up, and the camera matches; clicking a face, named like `render`'s views, an edge or a corner turns the camera to look from that side, keeping target and distance
 - the agent session survives a file switch, and each message names the file being viewed
 - opening another project is refused while the agent runs
-- the browser remembers the last project and its tabs, and reopens them on start; a reopened tab loads its build from disk when first shown, and builds only if it is out of date
+- the window remembers the last project and its tabs, and reopens them on start; a reopened tab loads its build from disk when first shown, and builds only if it is out of date
 - projects anywhere on disk import the language as `"vibecad"`; the CLI resolves it
 
 ## friction-free human-agent feedback loop
@@ -174,6 +173,8 @@
 - in draw mode, click a face to pin it, numbered, with its source line shown
 - drag in draw mode to mark an area; the stroke resolves to the faces under it
 - hold Space to talk; pins made while talking land in the sentence where they were said: "this [1] should match that [2]"
+- speech never leaves the machine: the window records it, and the server transcribes it with Whisper in the OS language, with each word's time; a pin goes after the words said before it
+- the speech model, about 260 MB, downloads into `~/.vibecad/models` on first use; it loads while the person talks
 - sending carries text, face ids, source lines, 3D points and a screenshot
 - the agent edits the source, the preview rebuilds on save, changed faces glow
 - the agent points back with `vibecad show`
@@ -245,7 +246,6 @@
 - wip: reference images: match the overlay camera to the image from dim end points; zoom the image
 - not yet verified: how close the agent places asked dims on real photos and sketches
 - wip: npm distribution. Node will not strip types under `node_modules`, so vibecad runs from this repo today; a release needs compiled output
-- wip: local speech recognition. Chrome's Web Speech sends audio to a cloud service
 - not yet verified: identical geometry across macOS, Linux and Windows; large assemblies; real microphone input; a successful codex turn
 
 ## revision history
@@ -277,3 +277,4 @@
 - 2026-11-13: add reference images: the agent models a photo or sketch and asks for dimensions over it
 - 2026-11-16: add the `knurl` primitive, built face by face
 - 2026-11-16: package the app as an Electron desktop app, served over a local socket
+- 2026-11-17: drop the browser app; voice runs locally with Whisper

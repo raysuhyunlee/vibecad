@@ -61,8 +61,7 @@ Commands that build also take --pose joint=value,other/joint=value.
                                  in all six views and iso, and prints what each number is
   export [entry] [--part p] --out file.step|file.stl
   diff <git-ref> [entry]         Compare the model with another revision
-  dev [--socket path]            Start the app; open a project and file inside it.
-                                 --socket listens there instead of the port.
+  dev --socket path              Serve the desktop app on a local socket; the app runs this.
                                  Settings: ~/.vibecad/config.json
   show --part p [--face id] [--message text]
                                  Point at geometry in the open preview`;
@@ -382,15 +381,12 @@ async function main() {
 
   const entry = rest[0] ?? "main.cad.ts";
   if (cmd === "dev") {
-    if (rest[0]) throw new CadError("DEV_TAKES_NO_FILE", "dev takes no file", undefined, "Run vibecad dev, then open the project in the app");
+    if (rest[0]) throw new CadError("DEV_TAKES_NO_FILE", "dev takes no file", undefined, "Open the project in the desktop app");
+    if (!o.socket) throw new CadError("MISSING_SOCKET", "dev needs --socket", undefined, "Run the desktop app with npm run app");
     const { loadConfig } = await import("./config.ts");
     const { serve } = await import("./server.ts");
     const config = loadConfig();
-    return serve({
-      ...config,
-      socket: o.socket,
-      print,
-    });
+    return serve({ ...config, socket: o.socket, print });
   }
   if (cmd === "show") return show(o.part, o.face, o.message);
 
@@ -485,11 +481,11 @@ setTimeout(() => { process.stdout.write(${JSON.stringify(JSON.stringify(error, n
 /** Asks the running preview to highlight geometry for the human. */
 async function show(part?: string, face?: string, message?: string) {
   if (!part) throw new CadError("MISSING_PART", "show needs --part");
-  if (!existsSync(DEV_FILE)) throw new CadError("NO_PREVIEW", "No preview has this project open. Run vibecad dev and open it in the app");
-  const { port, socket } = JSON.parse(readFileSync(DEV_FILE, "utf8"));
+  if (!existsSync(DEV_FILE)) throw new CadError("NO_PREVIEW", "No preview has this project open. Open it in the desktop app");
+  const { socket } = JSON.parse(readFileSync(DEV_FILE, "utf8"));
   // The desktop app listens on a socket, which fetch cannot reach.
   const status = await new Promise<number>((done, reject) => {
-    const req = request({ socketPath: socket, host: "127.0.0.1", port, path: "/show", method: "POST" }, (res) => {
+    const req = request({ socketPath: socket, path: "/show", method: "POST" }, (res) => {
       res.resume();
       done(res.statusCode ?? 0);
     });

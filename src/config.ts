@@ -7,19 +7,17 @@ import { CadError } from "./eval.ts";
 export const CONFIG_FILE = join(homedir(), ".vibecad", "config.json");
 
 export interface Config {
-  port: number;
   agent: string;
   model?: string;
 }
 
 const VALID: Record<keyof Config, [(v: unknown) => boolean, string]> = {
-  port: [(v) => Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 65535, "a port number"],
   agent: [(v) => typeof v === "string", "a string"],
   model: [(v) => typeof v === "string", "a string"],
 };
 
 export function loadConfig(): Config {
-  const config: Config = { port: 4173, agent: "claude" };
+  const config: Config = { agent: "claude" };
   if (!existsSync(CONFIG_FILE)) return config;
   let file: Record<string, unknown>;
   try {

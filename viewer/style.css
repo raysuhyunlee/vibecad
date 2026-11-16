@@ -358,6 +358,7 @@ button { font: inherit; color: inherit; }
 .chip svg { width: 12px; height: 12px; flex: none; }
 #queued, #mic-error { font-size: var(--font-sm); color: var(--muted); }
 #mic-error { color: var(--danger); }
+#mic-error.note { color: var(--muted); }
 
 #picker {
   width: min(520px, calc(100vw - 2 * var(--s4)));

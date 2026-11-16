@@ -1,6 +1,7 @@
 {
   "name": "vibecad",
   "version": "0.1.0",
+  "productName": "Vibecad",
   "description": "A CAD for agents, and a feedback system for humans",
   "type": "module",
   "private": true,
@@ -21,14 +22,38 @@
   },
   "build": {
     "appId": "dev.vibecad.app",
-    "productName": "vibecad",
+    "productName": "Vibecad",
     "asar": false,
-    "files": ["app/**", "src/**", "viewer/**", "libs/**", "factories/**", "package.json"],
-    "mac": { "target": "dir", "category": "public.app-category.developer-tools" },
-    "win": { "target": "dir" },
-    "linux": { "target": "dir" }
+    "files": [
+      "app/**",
+      "src/**",
+      "viewer/**",
+      "libs/**",
+      "factories/**",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "node_modules/three/examples/jsm", "to": "app/node_modules/three/examples/jsm" }
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "entitlements": "app/entitlements.mac.plist",
+      "entitlementsInherit": "app/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Vibecad listens while you hold Space to talk."
+      }
+    },
+    "win": {
+      "target": "dir"
+    },
+    "linux": {
+      "target": "dir"
+    }
   },
   "dependencies": {
+    "@huggingface/transformers": "4.3.2",
     "occt-wasm": "5.16.0",
     "three": "0.187.0"
   },

@@ -1366,18 +1366,13 @@ function pickerError(text) {
   $("picker-error").textContent = text;
   $("picker-error").hidden = !text;
 }
-function openPicker() {
-  $("picker").showModal();
-  browse();
-}
-// The OS's own folder dialog; the in-app picker stands in where there is none.
+// The app's own folder dialog; the in-app picker says why a folder cannot be opened.
 let picking = false;
 async function openProject() {
   if (picking) return;
   picking = true;
   try {
     const res = await post("/project/pick", {});
-    if (res.status === 501) return openPicker();
     const d = await res.json();
     if (!d.path) return;
     const opened = await post("/project", { path: d.path });
@@ -1769,11 +1764,12 @@ function updateSend() {
   send.dataset.stop = stop ? "1" : "";
   const target = opened.entry || photo.name;
   send.disabled = !stop && !target;
-  input.disabled = $("mic").disabled = !target;
+  input.disabled = !target;
+  $("mic").disabled = !target || $("composer").classList.contains("transcribing");
 }
 function insertToken(n) {
   if (listening) {
-    speechTokens.push({ n, at: speechText().length });
+    speechTokens.push({ n, t: (performance.now() - speechStart) / 1000 });
     renderSpeech();
     return;
   }
@@ -1835,87 +1831,120 @@ $("draw").onclick = () => setDraw(!drawMode);
 $("fit").onclick = fit;
 $("new-session").onclick = () => fetch("/session/new", { method: "POST" });
 
-// --- Voice: pins made while talking land where they were said ---------------
-const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognizer = null;
+// --- Voice: Whisper runs in the app; pins made while talking land where they were said ---
+// The OS language picks Whisper's; without one it translates to English.
+const SPEECH_LANG = (navigator.language || "en").split("-")[0];
+let recorder = null;
 let listening = false;
+let stopWanted = false;
+let speechStart = 0;
 let speechBase = "";
-let speechFinal = "";
-let speechInterim = "";
 let speechTokens = [];
-function speechText() {
-  return speechFinal + speechInterim;
-}
-function renderSpeech() {
-  const text = speechText();
-  let out = "", at = 0;
-  for (const t of [...speechTokens].sort((a, b) => a.at - b.at)) {
-    const cut = Math.min(t.at, text.length);
-    out += `${text.slice(at, cut)} [${t.n}] `;
-    at = cut;
+let voiceReady = false;
+/** The draft: what was typed before, then the words heard, each pin after the words said before it. */
+function renderSpeech(words = []) {
+  let out = "", i = 0;
+  for (const t of [...speechTokens].sort((a, b) => a.t - b.t)) {
+    while (i < words.length && (words[i].start + words[i].end) / 2 <= t.t) out += words[i++].text;
+    out += ` [${t.n}] `;
   }
-  out += text.slice(at);
-  input.value = (speechBase + out).replace(/ {2,}/g, " ").trimStart();
+  while (i < words.length) out += words[i++].text;
+  input.value = `${speechBase} ${out}`.replace(/ {2,}/g, " ").trimStart();
   updateSend();
 }
-function setMic(on) {
+function micNote(text, error) {
+  const el = $("mic-error");
+  el.textContent = text;
+  el.classList.toggle("note", !error);
+  el.hidden = !text;
+}
+/** idle, listening or transcribing. */
+function setMic(state) {
   const mic = $("mic");
+  const on = state === "listening";
   mic.className = `icon${on ? " danger" : ""}`;
   mic.querySelector("use").setAttribute("href", on ? "#i-stop" : "#i-mic");
   mic.setAttribute("aria-label", on ? "Stop talking and send" : "Talk (hold Space)");
   mic.title = mic.getAttribute("aria-label");
   $("composer").classList.toggle("listening", on);
+  $("composer").classList.toggle("transcribing", state === "transcribing");
+  updateSend();
 }
-function startListening() {
-  if (listening || (!opened.entry && !photo.name)) return;
-  const err = $("mic-error");
-  err.hidden = true;
-  if (!Recognition) {
-    err.textContent = "This browser has no speech recognition. Use Chrome or Safari, or type instead.";
-    err.hidden = false;
-    return;
-  }
-  recognizer = new Recognition();
-  recognizer.lang = navigator.language;
-  recognizer.continuous = true;
-  recognizer.interimResults = true;
-  speechBase = input.value;
-  speechFinal = speechInterim = "";
-  speechTokens = [];
+async function startListening() {
+  if (listening || $("composer").classList.contains("transcribing") || (!opened.entry && !photo.name)) return;
+  micNote("");
   listening = true;
-  setMic(true);
-  recognizer.onresult = (e) => {
-    speechInterim = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) speechFinal += e.results[i][0].transcript;
-      else speechInterim += e.results[i][0].transcript;
-    }
-    renderSpeech();
-  };
-  recognizer.onerror = (e) => {
-    if (e.error === "no-speech" || e.error === "aborted") return;
-    err.textContent = e.error === "not-allowed"
-      ? "Voice input failed because microphone access is blocked. Allow it in the browser, then try again."
-      : `Voice input failed (${e.error}). Try again, or type instead.`;
-    err.hidden = false;
-  };
-  recognizer.onend = () => {
+  stopWanted = false;
+  speechBase = input.value;
+  speechTokens = [];
+  speechStart = performance.now();
+  setMic("listening");
+  // Loading the model while the person talks hides most of its start.
+  fetch("/voice/load", { method: "POST" }).then((r) => r.json()).then((d) => (voiceReady = d.ready), () => {});
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
     listening = false;
-    setMic(false);
-    send();
+    setMic("idle");
+    return micNote("Voice input failed because microphone access is blocked. Allow vibecad in the system's microphone settings, then try again.", true);
+  }
+  if (!listening) return stream.getTracks().forEach((t) => t.stop());
+  const chunks = [];
+  const r = (recorder = new MediaRecorder(stream));
+  r.ondataavailable = (e) => chunks.push(e.data);
+  r.onstart = () => (speechStart = performance.now());
+  r.onstop = () => {
+    stream.getTracks().forEach((t) => t.stop());
+    if (!r.cancelled) transcribeSpeech(new Blob(chunks, { type: r.mimeType }));
   };
-  recognizer.start();
+  r.start();
+  if (stopWanted) r.stop();
+}
+async function transcribeSpeech(blob) {
+  listening = false;
+  recorder = null;
+  setMic("transcribing");
+  micNote(voiceReady ? "Transcribing..." : "Loading the speech model. The first time downloads about 260 MB.");
+  // A tap too short to record anything leaves the draft as it was.
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  const audio = await ctx.decodeAudioData(await blob.arrayBuffer()).catch(() => null).finally(() => ctx.close());
+  if (!audio) {
+    micNote("");
+    renderSpeech();
+    return setMic("idle");
+  }
+  try {
+    const res = await fetch(`/voice?lang=${SPEECH_LANG}`, { method: "POST", body: audio.getChannelData(0) });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error);
+    voiceReady = true;
+    micNote("");
+    renderSpeech(d.words);
+    setMic("idle");
+    send();
+  } catch (e) {
+    renderSpeech();
+    setMic("idle");
+    micNote(`Voice input failed (${e.message}). Try again, or type instead.`, true);
+  }
 }
 function stopListening() {
-  if (listening) recognizer.stop();
+  if (!listening) return;
+  if (recorder) recorder.stop();
+  else stopWanted = true;
 }
-/** Ends voice input without sending, keeping what was heard as the draft. */
+/** Ends voice input without sending, keeping the pins made as the draft. */
 function cancelListening() {
   if (!listening) return;
-  recognizer.onend = null;
-  recognizer.abort();
+  if (recorder) {
+    recorder.cancelled = true;
+    recorder.stop();
+  }
   listening = false;
-  setMic(false);
+  recorder = null;
+  renderSpeech();
+  setMic("idle");
 }
 $("mic").onclick = () => (listening ? stopListening() : startListening());
 
