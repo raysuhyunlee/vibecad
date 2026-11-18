@@ -136,6 +136,9 @@
 ## app and projects
 
 - the desktop app is the only way to run the app; it starts with nothing open
+- the app uses the approved diamond-cut orange V icon and dark wordmark splash from `vibecad-logo.pen`; exports live in `app/assets/`, including macOS, Windows and Linux icons
+- startup shows the splash before resolving the login shell's PATH or starting the server; the main window stays hidden until its first paint and the viewer's first server state, then replaces the splash without an artificial delay
+- closing the splash cancels startup; a startup timeout or load failure shows an error and quits
 - the desktop app runs `vibecad dev --socket <path>` as a child, on a local socket in its data folder, and its window loads `vibecad://app/`, whose requests it passes to that socket; so it opens no port and clashes with no other app; one runs at a time; `dev` takes no file
 - the server stopping, or failing to start, shows an error and quits the desktop app
 - `.vibecad/dev.json` records the server's socket, so `vibecad show` reaches it

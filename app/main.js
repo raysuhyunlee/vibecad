@@ -1,36 +1,44 @@
 // The desktop app: runs `vibecad dev` on Electron's own Node, on a local socket, and shows it in a window.
 import { app, BrowserWindow, dialog, protocol, shell } from "electron";
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { request } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import updater from "electron-updater";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+const ICON = fileURLToPath(new URL("./assets/icon.png", import.meta.url));
+const PRELOAD = fileURLToPath(new URL("./preload.cjs", import.meta.url));
 // The window loads vibecad://app/, and every request goes to the server's socket, so no port can clash.
 const ORIGIN = "vibecad://app";
 protocol.registerSchemesAsPrivileged([
   { scheme: "vibecad", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
 ]);
 
-// A GUI app on macOS or Linux starts without the login shell's PATH, so `claude` and `codex` would not be found.
-if (process.platform !== "win32") {
+// Resolve the login shell's PATH after showing the splash, without blocking its painting.
+async function shellPath() {
+  if (process.platform === "win32") return;
   try {
-    const path = execFileSync(process.env.SHELL || "/bin/zsh", ["-ilc", "printf %s \"$PATH\""], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] });
-    if (path) process.env.PATH = path.trim().split("\n").pop();
+    const { stdout } = await promisify(execFile)(process.env.SHELL || "/bin/zsh", ["-ilc", "printf %s \"$PATH\""], { encoding: "utf8", timeout: 5000 });
+    if (stdout.trim()) process.env.PATH = stdout.trim().split("\n").pop();
   } catch {}
 }
 
 let server;
 let socket;
 let win;
+let splash;
+let startupTimer;
 let quitting = false;
 
 function fail(message) {
   if (quitting) return;
   quitting = true;
+  clearTimeout(startupTimer);
+  splash?.destroy();
   dialog.showErrorBox("Vibecad", message);
   app.quit();
 }
@@ -42,7 +50,9 @@ function start() {
   const env = { ...process.env, ELECTRON_RUN_AS_NODE: "1" };
   server = spawn(process.execPath, [CLI, "dev", "--socket", socket], { cwd: homedir(), env, stdio: ["ignore", "pipe", "inherit"] });
   let out = "";
+  let announced = false;
   server.stdout.on("data", (chunk) => {
+    if (announced) return;
     out += chunk;
     let status;
     try {
@@ -50,9 +60,11 @@ function start() {
     } catch {
       return;
     }
+    announced = true;
     if (!status.ok) return fail(status.error?.message ?? "The app could not start.");
     open();
   });
+  server.on("error", (e) => fail(`The vibecad server could not start: ${e.message}`));
   server.on("exit", (code) => fail(`The vibecad server stopped (exit ${code}).`));
 }
 
@@ -78,13 +90,59 @@ async function forward(req) {
 }
 
 function open() {
-  win = new BrowserWindow({ width: 1440, height: 900, title: "Vibecad", backgroundColor: "#ffffff" });
+  if (quitting) return;
+  win = new BrowserWindow({
+    width: 1440, height: 900, title: "Vibecad", backgroundColor: "#ffffff", show: false, icon: ICON,
+    webPreferences: { preload: PRELOAD },
+  });
+  // Both the first paint and the viewer's initial server state must be ready.
+  let painted = false, initialized = false, shown = false;
+  const reveal = () => {
+    if (!painted || !initialized || shown || quitting) return;
+    shown = true;
+    clearTimeout(startupTimer);
+    win.show();
+    splash?.destroy();
+    watchUpdates();
+  };
+  win.once("ready-to-show", () => { painted = true; reveal(); });
+  win.webContents.ipc.once("viewer-ready", (event) => {
+    if (event.senderFrame !== win.webContents.mainFrame) return;
+    initialized = true;
+    reveal();
+  });
+  win.webContents.on("did-fail-load", (_event, code, description, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3) fail(`The app could not load: ${description}`);
+  });
+  win.webContents.on("render-process-gone", (_event, details) => {
+    if (details.reason !== "clean-exit") fail("The app window stopped unexpectedly. Please reopen Vibecad.");
+  });
   // Links leave the app for the person's browser.
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
   });
-  win.loadURL(`${ORIGIN}/`);
+  win.loadURL(`${ORIGIN}/`).catch((e) => fail(`The app could not load: ${e.message}`));
+}
+
+function showSplash() {
+  splash = new BrowserWindow({
+    width: 560, height: 340, title: "Vibecad", icon: ICON,
+    frame: false, resizable: false, maximizable: false, fullscreenable: false,
+    show: false, backgroundColor: "#20251F",
+  });
+  splash.on("closed", () => {
+    splash = null;
+    if (!win?.isVisible() && !quitting) app.quit();
+  });
+  splash.once("ready-to-show", async () => {
+    splash.show();
+    startupTimer = setTimeout(() => fail("Vibecad could not finish starting. Please reopen the app."), 30000);
+    await shellPath();
+    if (!quitting) start();
+  });
+  splash.loadFile(fileURLToPath(new URL("./splash.html", import.meta.url)))
+    .catch((e) => fail(`The startup screen could not load: ${e.message}`));
 }
 
 // How often a running app looks for a newer release.
@@ -119,17 +177,19 @@ function watchUpdates() {
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", () => {
-    if (win?.isMinimized()) win.restore();
-    win?.focus();
+    const active = splash ?? win;
+    if (active?.isMinimized()) active.restore();
+    active?.focus();
   });
   app.whenReady().then(() => {
     protocol.handle("vibecad", forward);
-    start();
-    watchUpdates();
+    app.dock?.setIcon(ICON);
+    showSplash();
   });
 }
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => {
   quitting = true;
+  clearTimeout(startupTimer);
   server?.kill();
 });

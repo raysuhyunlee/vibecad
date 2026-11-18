@@ -18,6 +18,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
+    "test:desktop": "electron test/desktop-smoke.mjs",
     "app": "electron ."
   },
   "build": {
@@ -40,6 +41,7 @@
     ],
     "publish": { "provider": "github", "owner": "raysuhyunlee", "repo": "vibecad" },
     "mac": {
+      "icon": "app/assets/icon.icns",
       "target": ["dmg", "zip"],
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
@@ -50,9 +52,11 @@
       }
     },
     "win": {
+      "icon": "app/assets/icon.ico",
       "target": "nsis"
     },
     "linux": {
+      "icon": "app/assets/icon.png",
       "target": "dir"
     }
   },

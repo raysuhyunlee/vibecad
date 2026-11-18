@@ -1994,6 +1994,7 @@ function showBanner(error) {
   }
 }
 const events = new EventSource("/events");
+let desktopReady = false;
 events.onmessage = (ev) => {
   const e = JSON.parse(ev.data);
   if (e.type === "hello") {
@@ -2001,6 +2002,10 @@ events.onmessage = (ev) => {
     $("log").replaceChildren();
     e.log.forEach(addMessage);
     setRunning(e.running, e.queued);
+    if (!desktopReady) {
+      desktopReady = true;
+      requestAnimationFrame(() => window.vibecadDesktop?.ready());
+    }
   } else if (e.type === "entry") {
     applyEntry(e);
   } else if (e.type === "files") {

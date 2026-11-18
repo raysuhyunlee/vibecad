@@ -1,4 +1,6 @@
-# vibecad
+<p align="center">
+  <img src="docs/assets/logo.png" alt="vibecad" width="720">
+</p>
 
 A CAD for agents, and a feedback system for humans. Parts are typed TypeScript objects, dimensions are their interfaces, and you steer the agent by pointing at the live model and talking.
 
