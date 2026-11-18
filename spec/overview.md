@@ -136,16 +136,16 @@
 ## app and projects
 
 - the desktop app is the only way to run the app; it starts with nothing open
-- the app uses the approved diamond-cut orange V icon and dark wordmark splash from `vibecad-logo.pen`; exports live in `app/assets/`, including macOS, Windows and Linux icons
+- the app uses the approved diamond-cut orange V icon and dark wordmark splash from `design/vibecad-logo.pen`; exports live in `app/assets/`, including macOS, Windows and Linux icons
 - startup shows the splash before resolving the login shell's PATH or starting the server; the main window stays hidden until its first paint and the viewer's first server state, then replaces the splash without an artificial delay
 - closing the splash cancels startup; a startup timeout or load failure shows an error and quits
 - the desktop app runs `vibecad dev --socket <path>` as a child, on a local socket in its data folder, and its window loads `vibecad://app/`, whose requests it passes to that socket; so it opens no port and clashes with no other app; one runs at a time; `dev` takes no file
 - the server stopping, or failing to start, shows an error and quits the desktop app
 - `.vibecad/dev.json` records the server's socket, so `vibecad show` reaches it
 - the desktop app reads PATH from the login shell, so the agent CLIs are found when started from Finder; builds and the agent run vibecad's CLI on the app's own Node, with `ELECTRON_RUN_AS_NODE`
-- `just build` packages the desktop app into `dist/` for this OS; `--mac --win --linux` pick others; macOS gets a dmg and a zip, signed and notarized when `.env` holds the keys (see `.env.example`), with the microphone entitlement voice needs; Windows gets an unsigned NSIS installer; Linux stays an unsigned folder
+- `just build` packages the desktop app into `dist/` for this OS; `--mac --win --linux` pick others; macOS gets a dmg and a zip, signed and notarized when `.env` holds the keys (see `.env.example`), with the microphone entitlement voice needs; Windows gets an unsigned NSIS installer; Linux gets an AppImage
 - work lands on `dev`; a pull request merges it to `main`; CI tests and typechecks both
-- a `v<version>` tag on `main`, matching `package.json`, makes CI build macOS (signed and notarized from repo secrets) and Windows and upload them to a draft GitHub release of `raysuhyunlee/vibecad`; publishing the draft ships the update
+- a `v<version>` tag on `main`, matching `package.json`, makes CI build macOS arm64 (signed and notarized from repo secrets), Windows x64 and Linux x64 and upload them to a draft GitHub release of `raysuhyunlee/vibecad`; its notes start with direct links to the DMG, EXE and AppImage, followed by generated release notes; publishing the draft ships the update
 - the packaged app checks GitHub releases at start and every 4 hours, downloads a newer one in the background, and offers a restart; declined, it installs on quit; a failed check is only logged. macOS updates from the zip, Windows from the installer
 - the person opens a project root with the desktop app's own folder dialog; where the folder cannot be opened, an in-app folder picker says why
 - opening a project runs its TypeScript in a build process, so only the person's own action opens one

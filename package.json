@@ -45,6 +45,7 @@
       "repo": "vibecad"
     },
     "mac": {
+      "artifactName": "Vibecad-${version}-${arch}.${ext}",
       "icon": "app/assets/icon.icns",
       "target": [
         "dmg",
@@ -59,12 +60,14 @@
       }
     },
     "win": {
+      "artifactName": "Vibecad-Setup-${version}.${ext}",
       "icon": "app/assets/icon.ico",
       "target": "nsis"
     },
     "linux": {
+      "artifactName": "Vibecad-${version}-${arch}.${ext}",
       "icon": "app/assets/icon.png",
-      "target": "dir"
+      "target": "AppImage"
     }
   },
   "dependencies": {

@@ -1,4 +1,4 @@
-# A pushed v* tag builds macOS and Windows and uploads both to a draft release; publishing the draft ships the update.
+# A pushed v* tag builds all three desktop platforms into a draft; publishing it ships the update.
 name: release
 on:
   push:
@@ -10,7 +10,21 @@ jobs:
   draft:
     runs-on: ubuntu-latest
     steps:
-      - run: gh release view "$GITHUB_REF_NAME" || gh release create "$GITHUB_REF_NAME" --draft --title "${GITHUB_REF_NAME#v}"
+      - name: Create draft with download links
+        run: |
+          if gh release view "$GITHUB_REF_NAME"; then exit 0; fi
+          version="${GITHUB_REF_NAME#v}"
+          base="https://github.com/$GH_REPO/releases/download/$GITHUB_REF_NAME"
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          ## Downloads
+
+          - [Windows (64-bit installer)]($base/Vibecad-Setup-$version.exe)
+          - [macOS (Apple silicon)]($base/Vibecad-$version-arm64.dmg)
+          - [Linux (64-bit AppImage)]($base/Vibecad-$version-x86_64.AppImage)
+
+          On Linux, mark the AppImage as executable before opening it.
+          EOF
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$version" --generate-notes --notes-file "$RUNNER_TEMP/release-notes.md"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -18,7 +32,7 @@ jobs:
     needs: draft
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +49,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           echo "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
-          APPLE_API_KEY="$RUNNER_TEMP/AuthKey.p8" npx electron-builder --mac --publish always
+          APPLE_API_KEY="$RUNNER_TEMP/AuthKey.p8" npx electron-builder --mac --arm64 --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
@@ -45,6 +59,11 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       - name: Build and upload Windows, unsigned
         if: runner.os == 'Windows'
-        run: npx electron-builder --win --publish always
+        run: npx electron-builder --win --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and upload Linux AppImage
+        if: runner.os == 'Linux'
+        run: npx electron-builder --linux --x64 --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
