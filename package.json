@@ -1,6 +1,6 @@
 {
   "name": "vibecad",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "productName": "Vibecad",
   "description": "A CAD for agents, and a feedback system for humans",
   "type": "module",
@@ -39,10 +39,17 @@
         "to": "app/node_modules/three/examples/jsm"
       }
     ],
-    "publish": { "provider": "github", "owner": "raysuhyunlee", "repo": "vibecad" },
+    "publish": {
+      "provider": "github",
+      "owner": "raysuhyunlee",
+      "repo": "vibecad"
+    },
     "mac": {
       "icon": "app/assets/icon.icns",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
       "entitlements": "app/entitlements.mac.plist",
