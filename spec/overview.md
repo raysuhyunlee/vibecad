@@ -147,6 +147,7 @@
 - work lands on `dev`; a pull request merges it to `main`; CI tests and typechecks both
 - a `v<version>` tag on `main`, matching `package.json`, makes CI build macOS arm64 (signed and notarized from repo secrets), Windows x64 and Linux x64 and upload them to a draft GitHub release of `raysuhyunlee/vibecad`; its notes start with direct links to the DMG, EXE and AppImage, followed by generated release notes; publishing the draft ships the update
 - the packaged app checks GitHub releases at start and every 4 hours, downloads a newer one in the background, and offers a restart; declined, it installs on quit; a failed check is only logged. macOS updates from the zip, Windows from the installer
+- `Check for Updates...` lives below About in the macOS Vibecad menu, and in Help on Windows and Linux; manual checks show checking/downloading status and report the latest version or an error; a downloaded update offers a restart again
 - the person opens a project root with the desktop app's own folder dialog; where the folder cannot be opened, an in-app folder picker says why
 - opening a project runs its TypeScript in a build process, so only the person's own action opens one
 - one app serves one project: the server's working directory is the root, and builds, agents and `.vibecad/` resolve against it
