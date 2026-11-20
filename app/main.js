@@ -1,5 +1,5 @@
 // The desktop app: runs `vibecad dev` on Electron's own Node, on a local socket, and shows it in a window.
-import { app, BrowserWindow, dialog, protocol, shell } from "electron";
+import { app, BrowserWindow, dialog, Menu, MenuItem, protocol, shell } from "electron";
 import { execFile, spawn } from "node:child_process";
 import { request } from "node:http";
 import { homedir } from "node:os";
@@ -147,14 +147,14 @@ function showSplash() {
 
 // How often a running app looks for a newer release.
 const UPDATE_CHECK_MS = 4 * 60 * 60 * 1000;
+let updateMenuItem;
+let downloadedVersion;
+let restartPromptOpen = false;
 
-/** Downloads newer GitHub releases in the background, and offers a restart once one is ready. */
-function watchUpdates() {
-  if (!app.isPackaged) return;
-  const { autoUpdater } = updater;
-  // An offline machine or a missing release is not the person's problem.
-  autoUpdater.on("error", (e) => console.error("update check failed:", e.message));
-  autoUpdater.on("update-downloaded", async ({ version }) => {
+async function offerRestart(version) {
+  if (restartPromptOpen || quitting) return;
+  restartPromptOpen = true;
+  try {
     const r = await dialog.showMessageBox(win, {
       type: "info",
       message: `Vibecad ${version} is ready`,
@@ -166,7 +166,70 @@ function watchUpdates() {
     if (r.response !== 0) return;
     // The server's exit on the way out must not show the crash dialog.
     quitting = true;
-    autoUpdater.quitAndInstall();
+    updater.autoUpdater.quitAndInstall();
+  } finally {
+    restartPromptOpen = false;
+  }
+}
+
+async function checkForUpdates() {
+  if (!updateMenuItem.enabled) return;
+  updateMenuItem.enabled = false;
+  updateMenuItem.label = "Checking for Updates...";
+  try {
+    if (!app.isPackaged) {
+      await dialog.showMessageBox(win, { type: "info", message: "Updates are available in the installed app.", detail: "This is a development build of Vibecad." });
+    } else if (downloadedVersion) {
+      await offerRestart(downloadedVersion);
+    } else {
+      const result = await updater.autoUpdater.checkForUpdates();
+      if (!result) throw new Error("The update service did not respond.");
+      if (downloadedVersion) {
+        await offerRestart(downloadedVersion);
+      } else if (result.isUpdateAvailable) {
+        updateMenuItem.label = "Downloading Update...";
+        // Observe failures even while the person leaves the download notice open.
+        const download = result.downloadPromise?.then(() => null, (error) => error);
+        await dialog.showMessageBox(win, { type: "info", message: `Downloading Vibecad ${result.updateInfo.version}`, detail: "You can keep working. We will let you know when it is ready to install." });
+        const downloadError = await download;
+        if (downloadError) throw downloadError;
+      } else {
+        await dialog.showMessageBox(win, { type: "info", message: "You're up to date", detail: `Vibecad ${app.getVersion()} is the latest version.` });
+      }
+    }
+  } catch (e) {
+    if (!quitting) await dialog.showMessageBox(win, { type: "error", message: "Could not update Vibecad", detail: `Check your internet connection and try again.\n\n${e.message}` });
+  } finally {
+    updateMenuItem.label = "Check for Updates...";
+    updateMenuItem.enabled = true;
+  }
+}
+
+function createMenu() {
+  const mac = process.platform === "darwin";
+  const menu = Menu.buildFromTemplate([
+    ...(mac ? [{ role: "appMenu" }] : []),
+    { role: "fileMenu" },
+    { role: "editMenu" },
+    { role: "viewMenu" },
+    { role: "windowMenu" },
+    { role: "help", submenu: [] },
+  ]);
+  updateMenuItem = new MenuItem({ id: "check-for-updates", label: "Check for Updates...", click: checkForUpdates });
+  const target = mac ? menu.items[0] : menu.items.find((item) => item.role === "help");
+  target.submenu.insert(mac ? 1 : 0, updateMenuItem);
+  Menu.setApplicationMenu(menu);
+}
+
+/** Downloads newer GitHub releases in the background, and offers a restart once one is ready. */
+function watchUpdates() {
+  if (!app.isPackaged) return;
+  const { autoUpdater } = updater;
+  // An offline machine or a missing release is not the person's problem.
+  autoUpdater.on("error", (e) => console.error("update check failed:", e.message));
+  autoUpdater.on("update-downloaded", ({ version }) => {
+    downloadedVersion = version;
+    void offerRestart(version);
   });
   const check = () => autoUpdater.checkForUpdates().catch(() => {});
   check();
@@ -182,6 +245,7 @@ else {
     active?.focus();
   });
   app.whenReady().then(() => {
+    createMenu();
     protocol.handle("vibecad", forward);
     app.dock?.setIcon(ICON);
     showSplash();
