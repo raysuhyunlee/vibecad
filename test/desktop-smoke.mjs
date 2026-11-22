@@ -1,6 +1,6 @@
 // Run with Electron: npm run test:desktop -- normal|cancel|load-failure
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { app, BrowserWindow, dialog, Menu, protocol } from "electron";
@@ -10,6 +10,7 @@ const mode = process.argv[2] ?? "normal";
 assert.ok(["normal", "cancel", "load-failure"].includes(mode));
 const userData = mkdtempSync(join(tmpdir(), "vibecad-desktop-"));
 app.setPath("userData", userData);
+const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 let splash, main, painted = false, initialized = false, passed = false;
 const errors = [];
 const messages = [];
@@ -39,6 +40,7 @@ protocol.handle = (scheme, handler) => handle(scheme, async (request) => {
   if (mode === "load-failure" && path === "/") return Response.error();
   if (path === "/events" && !initialized) {
     assert.ok(splash.isVisible());
+    assert.equal(await splash.webContents.executeJavaScript('document.getElementById("version").textContent'), `v${version}`);
     assert.equal(main.isVisible(), false);
     await capture(splash, "splash");
     assert.equal(main.isVisible(), false, "splash remains until server state arrives");

@@ -2,6 +2,7 @@
 import { app, BrowserWindow, dialog, Menu, MenuItem, protocol, shell } from "electron";
 import { execFile, spawn } from "node:child_process";
 import { request } from "node:http";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -12,6 +13,12 @@ import updater from "electron-updater";
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const ICON = fileURLToPath(new URL("./assets/icon.png", import.meta.url));
 const PRELOAD = fileURLToPath(new URL("./preload.cjs", import.meta.url));
+// Read the version from the root package.json; never fall back to Electron's version.
+const VERSION = (() => {
+  try { return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version ?? ""; }
+  catch { return ""; }
+})();
+if (VERSION) app.setVersion(VERSION);
 // The window loads vibecad://app/, and every request goes to the server's socket, so no port can clash.
 const ORIGIN = "vibecad://app";
 protocol.registerSchemesAsPrivileged([
@@ -141,7 +148,7 @@ function showSplash() {
     await shellPath();
     if (!quitting) start();
   });
-  splash.loadFile(fileURLToPath(new URL("./splash.html", import.meta.url)))
+  splash.loadFile(fileURLToPath(new URL("./splash.html", import.meta.url)), { query: { version: VERSION } })
     .catch((e) => fail(`The startup screen could not load: ${e.message}`));
 }
 
