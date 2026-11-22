@@ -2,3 +2,4 @@ node_modules/
 .vibecad/
 dist/
 .env
+.DS_Store
