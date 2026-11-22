@@ -15,6 +15,7 @@ let splash, main, painted = false, initialized = false, passed = false;
 const errors = [];
 const messages = [];
 let updateChecks = 0;
+let onUpdateWindow;
 let checkUpdate = async () => ({ isUpdateAvailable: false });
 Object.defineProperty(app, "isPackaged", { get: () => true });
 updater.autoUpdater.checkForUpdates = () => { updateChecks++; return checkUpdate(); };
@@ -65,6 +66,7 @@ app.on("browser-window-created", (_event, win) => {
     });
     return;
   }
+  if (main) return onUpdateWindow?.(win);
   main = win;
   assert.equal(win.isVisible(), false);
   win.once("ready-to-show", () => { painted = true; });
@@ -104,20 +106,76 @@ app.on("browser-window-created", (_event, win) => {
     item.click();
     await waitFor(() => item.enabled);
     assert.match(messages.at(-1).detail, /Offline/);
-    let finishDownload;
-    checkUpdate = async () => ({ isUpdateAvailable: true, updateInfo: { version: "0.2.0" }, downloadPromise: new Promise((resolve) => { finishDownload = resolve; }) });
-    item.click();
-    await waitFor(() => item.label === "Downloading Update...");
-    assert.equal(item.enabled, false);
-    updater.autoUpdater.emit("update-downloaded", { version: "0.2.0" });
+    assert.equal(updater.autoUpdater.autoDownload, false, "nothing downloads before the person chooses to install");
+    // Long release notes scroll inside a window of bounded height; only What's Changed shows, cleaned.
+    const items = Array.from({ length: 40 }, (_, i) => `<li>Change ${i} https://github.com/raysuhyunlee/vibecad/pull/${i}${"x".repeat(80)} <script>window.bad = 1</script><a href="javascript:window.bad = 1">link</a></li>`).join("");
+    const longNotes = `<h2>Downloads</h2><ul><li>dmg</li></ul><h2>What&#39;s Changed</h2><ul>${items}</ul><h2>New Contributors</h2><p>skipped</p>`;
+    const openUpdate = async (releaseNotes, name) => {
+      checkUpdate = async () => ({ isUpdateAvailable: true, updateInfo: { version: "0.3.0", releaseNotes } });
+      const shown = new Promise((resolve) => { onUpdateWindow = (w) => w.once("show", () => resolve(w)); });
+      item.click();
+      const w = await shown;
+      await waitFor(() => item.enabled);
+      await new Promise((r) => setTimeout(r, 100));
+      const layout = await w.webContents.executeJavaScript(`(() => {
+        const notes = document.getElementById("notes");
+        const box = (s) => document.querySelector(s).getBoundingClientRect();
+        return {
+          title: document.querySelector("h1").textContent,
+          version: document.getElementById("version").textContent,
+          items: notes.querySelectorAll("li").length,
+          text: notes.textContent,
+          scripts: notes.querySelectorAll("script").length,
+          badLinks: [...notes.querySelectorAll("a")].filter((a) => a.href && !a.href.startsWith("http")).length,
+          scrolls: notes.scrollHeight > notes.clientHeight,
+          footerBottom: box("footer").bottom,
+          installRight: box("#install").right,
+          height: innerHeight,
+          width: document.documentElement.clientWidth,
+          scrollWidth: document.documentElement.scrollWidth,
+        };
+      })()`);
+      await capture(w, name);
+      assert.equal(layout.title, "New version is out!");
+      assert.equal(layout.version, "Vibecad 0.3.0");
+      assert.ok(layout.footerBottom <= layout.height + 0.5, "footer stays inside the window");
+      assert.ok(layout.installRight <= layout.width + 0.5, "buttons stay inside the window");
+      assert.ok(layout.scrollWidth <= layout.width, "no horizontal overflow");
+      return { w, layout };
+    };
+    let { w: updateWin, layout } = await openUpdate(longNotes, "update-long");
+    assert.equal(layout.items, 40);
+    assert.equal(layout.scripts, 0);
+    assert.equal(layout.badLinks, 0);
+    assert.doesNotMatch(layout.text, /dmg|skipped/);
+    assert.ok(layout.scrolls, "long notes scroll");
+    assert.equal(updateWin.getContentSize()[1], 560, "window height is capped");
+    const closed = new Promise((resolve) => updateWin.once("closed", resolve));
+    await updateWin.webContents.executeJavaScript('document.getElementById("later").click()');
+    await closed;
+    ({ w: updateWin, layout } = await openUpdate("<h2>What's Changed</h2><ul><li>One fix</li></ul>", "update-short"));
+    assert.equal(layout.scrolls, false);
+    assert.ok(updateWin.getContentSize()[1] < 300, "short notes give a short window");
+    // Installing downloads with progress, then installs and restarts.
+    let finishDownload, installed;
+    updater.autoUpdater.downloadUpdate = () => new Promise((resolve) => { finishDownload = resolve; });
+    updater.autoUpdater.quitAndInstall = (...args) => { installed = args; };
+    await updateWin.webContents.executeJavaScript('document.getElementById("install").click()');
+    await waitFor(() => finishDownload);
+    updater.autoUpdater.emit("download-progress", { percent: 42.4 });
+    await new Promise((r) => setTimeout(r, 300));
+    const progress = await updateWin.webContents.executeJavaScript(`({
+      visible: !document.getElementById("progress").hidden,
+      value: document.getElementById("progress").getAttribute("aria-valuenow"),
+      install: document.getElementById("install").textContent,
+      later: document.getElementById("later").textContent,
+    })`);
+    assert.deepEqual(progress, { visible: true, value: "42", install: "Downloading... 42%", later: "Cancel" });
+    await capture(updateWin, "update-progress");
     finishDownload();
-    await waitFor(() => item.enabled);
-    assert.equal(messages.at(-1).message, "Vibecad 0.2.0 is ready");
-    const checksBeforeRestart = updateChecks;
-    item.click();
-    await waitFor(() => item.enabled);
-    assert.equal(updateChecks, checksBeforeRestart, "downloaded updates offer restart without another check");
-    assert.equal(messages.at(-1).message, "Vibecad 0.2.0 is ready");
+    await waitFor(() => installed);
+    assert.deepEqual(installed, [true, true], "installs silently and reopens");
+    updateWin.destroy();
     const minimized = new Promise((resolve) => win.once("minimize", resolve));
     win.minimize();
     await minimized;

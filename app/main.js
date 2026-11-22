@@ -1,5 +1,5 @@
 // The desktop app: runs `vibecad dev` on Electron's own Node, on a local socket, and shows it in a window.
-import { app, BrowserWindow, dialog, Menu, MenuItem, protocol, shell } from "electron";
+import { app, BrowserWindow, dialog, Menu, MenuItem, nativeTheme, protocol, shell } from "electron";
 import { execFile, spawn } from "node:child_process";
 import { request } from "node:http";
 import { readFileSync } from "node:fs";
@@ -13,6 +13,7 @@ import updater from "electron-updater";
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const ICON = fileURLToPath(new URL("./assets/icon.png", import.meta.url));
 const PRELOAD = fileURLToPath(new URL("./preload.cjs", import.meta.url));
+const UPDATE_PRELOAD = fileURLToPath(new URL("./update-preload.cjs", import.meta.url));
 // Read the version from the root package.json; never fall back to Electron's version.
 const VERSION = (() => {
   try { return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version ?? ""; }
@@ -154,52 +155,109 @@ function showSplash() {
 
 // How often a running app looks for a newer release.
 const UPDATE_CHECK_MS = 4 * 60 * 60 * 1000;
+const UPDATE_WIDTH = 480;
+// Past this height the release notes scroll inside the window.
+const UPDATE_MAX_HEIGHT = 560;
 let updateMenuItem;
-let downloadedVersion;
-let restartPromptOpen = false;
+let updateWindow;
+// A version the person put off is not offered again by background checks.
+let dismissedVersion;
+let updaterReady = false;
 
-async function offerRestart(version) {
-  if (restartPromptOpen || quitting) return;
-  restartPromptOpen = true;
-  try {
-    const r = await dialog.showMessageBox(win, {
-      type: "info",
-      message: `Vibecad ${version} is ready`,
-      detail: "Restart now to update, or it installs when you quit.",
-      buttons: ["Restart", "Later"],
-      defaultId: 0,
-      cancelId: 1,
-    });
-    if (r.response !== 0) return;
+/** Nothing downloads until the person chooses to install. */
+function setupUpdater() {
+  if (updaterReady) return updater.autoUpdater;
+  updaterReady = true;
+  const { autoUpdater } = updater;
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  // An offline machine or a missing release is not the person's problem.
+  autoUpdater.on("error", (e) => console.error("update failed:", e.message));
+  autoUpdater.on("download-progress", ({ percent }) => sendUpdateState({ phase: "downloading", percent }));
+  return autoUpdater;
+}
+
+function sendUpdateState(state) {
+  if (updateWindow && !updateWindow.isDestroyed()) updateWindow.webContents.send("update-state", state);
+}
+
+/** GitHub gives the release body as HTML, or one entry per release when several are newer. */
+function releaseNotes(info) {
+  const notes = info.releaseNotes;
+  if (Array.isArray(notes)) return notes[0]?.note ?? "";
+  return typeof notes === "string" ? notes : "";
+}
+
+/** Asks whether to install the new version, then downloads and installs it with progress. */
+function offerUpdate(info, { manual = false } = {}) {
+  if (quitting || (!manual && info.version === dismissedVersion)) return;
+  if (updateWindow) return updateWindow.focus();
+  const parent = win && !win.isDestroyed() ? win : undefined;
+  const w = new BrowserWindow({
+    parent, modal: !!parent, width: UPDATE_WIDTH, height: 240, title: "Vibecad Update", icon: ICON,
+    resizable: false, minimizable: false, maximizable: false, fullscreenable: false, show: false,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#212327" : "#ffffff",
+    webPreferences: { preload: UPDATE_PRELOAD },
+  });
+  updateWindow = w;
+  let token;
+  const { ipc } = w.webContents;
+  ipc.handle("update-info", () => ({ version: info.version, notes: releaseNotes(info) }));
+  ipc.on("update-resize", (_event, height) => {
+    const h = Math.min(UPDATE_MAX_HEIGHT, Math.max(160, Math.round(Number(height) || 0)));
+    w.setContentSize(UPDATE_WIDTH, h);
+    if (!w.isVisible()) w.show();
+  });
+  ipc.on("update-later", () => w.close());
+  ipc.on("update-install", async () => {
+    if (token) return;
+    token = new updater.CancellationToken();
+    sendUpdateState({ phase: "downloading", percent: 0 });
+    try {
+      await setupUpdater().downloadUpdate(token);
+    } catch (e) {
+      const cancelled = token.cancelled;
+      token = undefined;
+      if (!cancelled) sendUpdateState({ phase: "error", message: `Could not download the update. Check your internet connection and try again. (${e.message})` });
+      return;
+    }
+    if (w.isDestroyed()) return;
+    sendUpdateState({ phase: "installing" });
     // The server's exit on the way out must not show the crash dialog.
     quitting = true;
-    updater.autoUpdater.quitAndInstall();
-  } finally {
-    restartPromptOpen = false;
-  }
+    // Install silently and reopen the app.
+    setupUpdater().quitAndInstall(true, true);
+  });
+  // Closing during the download cancels it; closing before installing puts this version off.
+  w.on("closed", () => {
+    if (token && !quitting) token.cancel();
+    if (!quitting) dismissedVersion = info.version;
+    updateWindow = undefined;
+  });
+  w.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
+  });
+  w.webContents.on("will-navigate", (e, url) => {
+    e.preventDefault();
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+  });
+  w.loadFile(fileURLToPath(new URL("./update.html", import.meta.url))).catch((e) => console.error("update window failed:", e.message));
 }
 
 async function checkForUpdates() {
   if (!updateMenuItem.enabled) return;
+  if (updateWindow) return updateWindow.focus();
   updateMenuItem.enabled = false;
   updateMenuItem.label = "Checking for Updates...";
   try {
     if (!app.isPackaged) {
       await dialog.showMessageBox(win, { type: "info", message: "Updates are available in the installed app.", detail: "This is a development build of Vibecad." });
-    } else if (downloadedVersion) {
-      await offerRestart(downloadedVersion);
     } else {
-      const result = await updater.autoUpdater.checkForUpdates();
+      const result = await setupUpdater().checkForUpdates();
       if (!result) throw new Error("The update service did not respond.");
-      if (downloadedVersion) {
-        await offerRestart(downloadedVersion);
-      } else if (result.isUpdateAvailable) {
-        updateMenuItem.label = "Downloading Update...";
-        // Observe failures even while the person leaves the download notice open.
-        const download = result.downloadPromise?.then(() => null, (error) => error);
-        await dialog.showMessageBox(win, { type: "info", message: `Downloading Vibecad ${result.updateInfo.version}`, detail: "You can keep working. We will let you know when it is ready to install." });
-        const downloadError = await download;
-        if (downloadError) throw downloadError;
+      if (result.isUpdateAvailable) {
+        offerUpdate(result.updateInfo, { manual: true });
       } else {
         await dialog.showMessageBox(win, { type: "info", message: "You're up to date", detail: `Vibecad ${app.getVersion()} is the latest version.` });
       }
@@ -228,17 +286,13 @@ function createMenu() {
   Menu.setApplicationMenu(menu);
 }
 
-/** Downloads newer GitHub releases in the background, and offers a restart once one is ready. */
+/** Looks for newer GitHub releases in the background, and asks whether to install one. */
 function watchUpdates() {
   if (!app.isPackaged) return;
-  const { autoUpdater } = updater;
-  // An offline machine or a missing release is not the person's problem.
-  autoUpdater.on("error", (e) => console.error("update check failed:", e.message));
-  autoUpdater.on("update-downloaded", ({ version }) => {
-    downloadedVersion = version;
-    void offerRestart(version);
-  });
-  const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  const autoUpdater = setupUpdater();
+  const check = () => autoUpdater.checkForUpdates()
+    .then((result) => { if (result?.isUpdateAvailable) offerUpdate(result.updateInfo); })
+    .catch(() => {});
   check();
   setInterval(check, UPDATE_CHECK_MS);
 }

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; script-src 'self'; style-src 'self'">
+  <title>Vibecad Update</title>
+  <link rel="stylesheet" href="../viewer/style.css">
+  <link rel="stylesheet" href="./update.css">
+</head>
+<body>
+  <header>
+    <img src="./assets/icon.png" alt="" width="48" height="48" draggable="false">
+    <div>
+      <h1>New version is out!</h1>
+      <p id="version"></p>
+    </div>
+  </header>
+  <section id="notes" aria-label="What's New" hidden></section>
+  <footer>
+    <div id="status">
+      <div id="progress" role="progressbar" aria-label="Update progress" aria-valuemin="0" aria-valuemax="100" hidden><div></div></div>
+      <p id="error" role="alert" hidden></p>
+    </div>
+    <button id="later" class="button" type="button">Later</button>
+    <button id="install" class="button primary" type="button">Install and Restart</button>
+  </footer>
+  <script src="./update.js"></script>
+</body>
+</html>
