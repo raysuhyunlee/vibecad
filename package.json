@@ -1,6 +1,6 @@
 {
   "name": "vibecad",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "productName": "Vibecad",
   "description": "A CAD for agents, and a feedback system for humans",
   "type": "module",
