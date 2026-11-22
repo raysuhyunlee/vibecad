@@ -179,6 +179,7 @@
 
 - in draw mode, click a face to pin it, numbered, with its source line shown
 - drag in draw mode to mark an area; the stroke resolves to the faces under it
+- draw mode turns off after one pin or stroke; a click that hits nothing keeps it on
 - hold Space to talk; pins made while talking land in the sentence where they were said: "this [1] should match that [2]"
 - speech never leaves the machine: the window records it, and the server transcribes it with Whisper in the OS language, with each word's time; a pin goes after the words said before it
 - the speech model, about 260 MB, downloads into `~/.vibecad/models` on first use; it loads while the person talks

@@ -724,10 +724,17 @@ canvas.addEventListener("pointerup", (e) => {
   const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
   down = null;
   if (stroke) {
-    if (moved > CLICK_SLOP) return finishStroke();
+    // One pin or stroke per press of the draw tool.
+    if (moved > CLICK_SLOP) {
+      if (finishStroke()) setDraw(false);
+      return;
+    }
     stroke = null;
     const hit = pick(e);
-    if (hit) addPin(hit);
+    if (hit) {
+      addPin(hit);
+      setDraw(false);
+    }
     return;
   }
   if (moved <= CLICK_SLOP) toggleMeasure(pickAny(e));
@@ -741,11 +748,12 @@ function extendStroke(e) {
 function finishStroke() {
   const s = stroke;
   stroke = null;
-  if (s.points.length < 2) return;
+  if (s.points.length < 2) return false;
   const r = { n: nextRef++, stroke: s.points, faces: [...s.faces.values()].slice(0, 12), point: s.points[0] };
   refs.push(r);
   insertToken(r.n);
   renderRefs();
+  return true;
 }
 function setDraw(on) {
   drawMode = on;
