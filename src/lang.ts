@@ -705,6 +705,28 @@ export function slider(
   };
 }
 
+/** How a joint moves into a key from the one before: cubic `in`, `out` and `inOut`; `step` jumps at the key. */
+export type Ease = "linear" | "in" | "out" | "inOut" | "step";
+export const EASES: readonly Ease[] = ["linear", "in", "out", "inOut", "step"];
+/** A keyframe: `t` in seconds, and joint values by path from this assembly, `sub/name` for a sub-assembly's.
+ * `ease` shapes the way into this key, else the motion's. */
+export interface MotionKey {
+  t: number;
+  pose: Record<string, number>;
+  ease?: Ease;
+}
+/** A named animation of an assembly's joints. Each joint eases between the keys that set it. */
+export interface MotionDef {
+  keys: MotionKey[];
+  ease: Ease;
+  src: Src;
+}
+/** Animates joints through keyframes, in rising `t`. `ease` is the default for its keys, `linear` by default.
+ * The viewer plays it in a loop; it never changes the source pose. */
+export function motion(keys: MotionKey[], opts: { ease?: Ease } = {}): MotionDef {
+  return { keys, ease: opts.ease ?? "linear", src: callerSrc() };
+}
+
 export interface Query {
   /** Minimum distance between two solids, 0 when touching or overlapping. */
   distance(a: Instance, b: Instance): number;
@@ -767,6 +789,7 @@ export class Instance<P extends string = string> {
   readonly children: Record<string, Instance>;
   readonly mates: MateDef[];
   readonly joints: Record<string, JointDef>;
+  readonly motions: Record<string, MotionDef>;
   readonly checks: CheckDef[];
   readonly ground?: MateDef;
 
@@ -779,6 +802,7 @@ export class Instance<P extends string = string> {
     children?: Record<string, Instance>;
     mates?: MateDef[];
     joints?: Record<string, JointDef>;
+    motions?: Record<string, MotionDef>;
     checks?: CheckDef[];
     ground?: MateDef;
   }) {
@@ -791,6 +815,7 @@ export class Instance<P extends string = string> {
     this.children = init.children ?? {};
     this.mates = init.mates ?? [];
     this.joints = init.joints ?? {};
+    this.motions = init.motions ?? {};
     this.checks = init.checks ?? [];
   }
 
@@ -852,7 +877,7 @@ export function place<P extends string>(inst: Instance<P>): Instance<P> {
   const copy = new Instance<P>({
     typeName: inst.typeName, params: inst.params, src: callerSrc(),
     ...(inst.solid && { solid: inst.solid }),
-    ports: inst.ports, children: inst.children, mates: inst.mates, joints: inst.joints, checks: inst.checks,
+    ports: inst.ports, children: inst.children, mates: inst.mates, joints: inst.joints, motions: inst.motions, checks: inst.checks,
     ...(inst.ground && { ground: inst.ground }),
   });
   return Object.assign(copy, { [ORIGIN]: originOf(inst) });
@@ -865,6 +890,8 @@ export function assembly<P extends object, K extends string = never>(
     parts: Record<string, Instance<any>>;
     mates?: MateDef[];
     joints?: Record<string, JointDef>;
+    /** Named animations of the joints, played from the viewer. */
+    motions?: Record<string, MotionDef>;
     ports?: Record<K, PortRef>;
     checks?: CheckDef[];
     /** `mate(world, port)`: fixes that part to the world frame, used only when this assembly is the entry. */
@@ -881,6 +908,7 @@ export function assembly<P extends object, K extends string = never>(
       ...(r.ground && { ground: r.ground }),
       ...(r.mates && { mates: r.mates }),
       ...(r.joints && { joints: r.joints }),
+      ...(r.motions && { motions: r.motions }),
       ...(r.ports && { ports: r.ports }),
       ...(r.checks && { checks: r.checks }),
     });

@@ -44,11 +44,12 @@ Standard and shared parts come from libraries, folders of instances: `import bol
 
 An assembly imports other files' instances, `import plate from "./plate.cad.ts"`, and `place(plate)` places one again. Each part is built once and kept in `.vibecad/builds`, so an assembly reuses it.
 
-Joints make an assembly move. Drag a joint's slider in the app, or set a pose from the CLI with `--pose pan=30`. `vibecad test` checks `noCollision` across the joint's range.
+Joints make an assembly move, and `motions` animate them; play one from the app's joint panel. Drag a joint's slider in the app, or set a pose from the CLI with `--pose pan=30`. `vibecad test` checks `noCollision` across the joint's range.
 
 ```ts
 const pan = revolute(servo.port("shaft"), horn.port("hub"), { min: -90, max: 90 });
-return { parts: { servo, horn }, joints: { pan }, checks: [noCollision(horn, servo, { joint: pan })] };
+const sweep = motion([{ t: 0, pose: { pan: -90 } }, { t: 1, pose: { pan: 90 } }, { t: 2, pose: { pan: -90 } }]);
+return { parts: { servo, horn }, joints: { pan }, motions: { sweep }, checks: [noCollision(horn, servo, { joint: pan })] };
 ```
 
 ## Directory Structure

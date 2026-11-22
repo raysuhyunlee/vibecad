@@ -1,4 +1,4 @@
-import { assembly, check, mate, minClearance, noCollision, noOverlap, revolute } from "vibecad";
+import { assembly, check, mate, minClearance, motion, noCollision, noOverlap, revolute } from "vibecad";
 import bracket from "./parts/bracket.cad.ts";
 import horn from "./parts/horn.cad.ts";
 import plate from "./parts/plate.cad.ts";
@@ -17,6 +17,8 @@ export default assembly("PanTiltBase", () => {
       mate(left.port("servoSeat"), servo.port("seat")),
     ],
     joints: { pan },
+    // one full pan sweep, 3 s
+    motions: { sweep: motion([{ t: 0, pose: { pan: -90 } }, { t: 1.5, pose: { pan: 90 } }, { t: 3, pose: { pan: -90 } }], { ease: "inOut" }) },
     checks: [
       minClearance(left, right, 5),
       noOverlap(left, servo),

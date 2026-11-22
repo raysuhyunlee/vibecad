@@ -192,6 +192,7 @@ function showView(file) {
   nextRef = kept?.nextRef ?? 1;
   input.value = kept?.draft ?? "";
   pose = kept?.pose ?? {};
+  stopMotion();
   const view = views.get(file);
   scene.remove(world);
   world = view?.world ?? new THREE.Group();
@@ -795,6 +796,7 @@ function frame(now) {
       flashOverlays = [];
     }
   }
+  stepMotion(now);
   renderer.render(scene, camera);
   renderGizmo();
   const ctx = ink.getContext("2d");
@@ -920,6 +922,7 @@ function jointRow(j) {
   };
   const set = (v) => {
     if (!Number.isFinite(v)) return;
+    stopMotion();
     pose[j.path] = v;
     applyPose();
     show();
@@ -928,11 +931,64 @@ function jointRow(j) {
   number.oninput = () => set(number.valueAsNumber);
   number.onblur = show;
   reset.onclick = () => {
+    stopMotion();
     delete pose[j.path];
     applyPose();
     show();
   };
   show();
+  jointShows.push(show);
+  return el;
+}
+
+// --- Motions: the source's animations, played in a loop over the pose -------
+let playing = null; // { path, start } of the motion playing on screen
+let jointShows = []; // refreshes each joint row from the pose
+/** Each ease maps progress 0..1 into a key to progress of the value; see `Ease` in lang.ts. */
+const EASE = {
+  linear: (u) => u,
+  in: (u) => u ** 3,
+  out: (u) => 1 - (1 - u) ** 3,
+  inOut: (u) => (u < 0.5 ? 4 * u ** 3 : 1 - (-2 * u + 2) ** 3 / 2),
+  step: (u) => (u < 1 ? 0 : 1),
+};
+const motionAt = (keys, t) => {
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i++) {
+    const [t1, v1, ease] = keys[i];
+    if (t > t1) continue;
+    const [t0, v0] = keys[i - 1];
+    return v0 + (v1 - v0) * (EASE[ease] ?? EASE.linear)((t - t0) / (t1 - t0));
+  }
+  return keys.at(-1)[1];
+};
+function stepMotion(now) {
+  if (!playing) return;
+  const m = (model?.motions ?? []).find((x) => x.path === playing.path);
+  if (!m) return stopMotion();
+  const t = m.duration > 0 ? ((now - playing.start) / 1000) % m.duration : 0;
+  for (const { joint, keys } of m.tracks) pose[joint] = motionAt(keys, t);
+  applyPose();
+  for (const show of jointShows) show();
+}
+function stopMotion() {
+  if (!playing) return;
+  playing = null;
+  for (const b of document.querySelectorAll(".motion button")) b.setAttribute("aria-pressed", "false");
+}
+function motionRow(m) {
+  const b = row(m.path, `${jointNumber(m.duration)}s`, false, () => {
+    const on = playing?.path !== m.path;
+    stopMotion();
+    if (on) playing = { path: m.path, start: performance.now() };
+    b.setAttribute("aria-pressed", String(on));
+  });
+  b.title = `Play ${m.path}`;
+  b.setAttribute("aria-pressed", String(playing?.path === m.path));
+  b.insertAdjacentHTML("afterbegin", '<svg aria-hidden="true" class="off"><use href="#i-play"/></svg><svg aria-hidden="true" class="on"><use href="#i-pause"/></svg>');
+  const el = document.createElement("div");
+  el.className = "motion";
+  el.append(b);
   return el;
 }
 
@@ -1010,7 +1066,8 @@ function renderDesign() {
   if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
   $("parts").replaceChildren(...partRows());
   $("joints").hidden = model.joints.length === 0;
-  $("joints").replaceChildren(...model.joints.map(jointRow));
+  jointShows = [];
+  $("joints").replaceChildren(...(model.motions ?? []).map(motionRow), ...model.joints.map(jointRow));
   const part = selectedPart !== null ? parts.get(selectedPart) : null;
   const steps = $("steps");
   steps.hidden = !part;

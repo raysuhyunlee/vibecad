@@ -284,6 +284,7 @@ function summary(m: Model) {
       faces: p.faces.length, steps: p.steps.length,
     })),
     joints: m.joints.map((j) => ({ path: j.path, kind: j.kind, value: j.value, min: j.min, max: j.max, src: j.src })),
+    motions: (m.motions ?? []).map((x) => ({ path: x.path, duration: x.duration, joints: x.tracks.map((t) => t.joint), src: x.src })),
     checks: m.checks,
   };
 }

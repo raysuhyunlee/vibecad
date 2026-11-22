@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { BooleanOp, JoinType, OcctKernel, SweepMode, TransitionMode, type EvolutionData, type ShapeHandle } from "occt-wasm";
 import {
   EdgeSel, Instance, isWorld, originOf, Solid, world,
-  type CheckDef, type FaceRef, type Helix, type JointDef, type KnurlPattern, type MateDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Spine, type Src, type Vec3,
+  EASES, type CheckDef, type Ease, type FaceRef, type Helix, type JointDef, type KnurlPattern, type MateDef, type MotionDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Spine, type Src, type Vec3,
 } from "./lang.ts";
 
 const HASH_BOUND = 2147483647;
@@ -87,6 +87,13 @@ export interface JointResult {
   moves: string[];
   src: Src;
 }
+/** A motion as per-joint tracks of [t, value, ease], by full joint path; ease shapes the way into that key. */
+export interface MotionResult {
+  path: string;
+  duration: number;
+  tracks: Array<{ joint: string; keys: Array<[number, number, Ease]> }>;
+  src: Src;
+}
 export interface MeshData {
   path: string;
   positions: Float32Array;
@@ -132,6 +139,7 @@ export interface Model {
   assemblies: PlaceResult[];
   /** Ordered from the fixed part outward, so a joint comes after those that carry it. */
   joints: JointResult[];
+  motions: MotionResult[];
   /** Path of the part fixed to the world by the entry's ground. */
   ground?: string;
   checks: CheckResult[];
@@ -1135,6 +1143,38 @@ function collectJoints(node: Node, out: Array<[string, JointDef]>) {
   for (const [name, j] of Object.entries(node.inst.joints)) out.push([childPath(node, name), j]);
   for (const c of node.children.values()) collectJoints(c, out);
 }
+/** Checks each motion against the joints it moves and turns it into tracks. */
+function collectMotions(node: Node, named: Array<[string, JointDef]>, out: MotionResult[]) {
+  for (const [name, m] of Object.entries(node.inst.motions ?? {}) as Array<[string, MotionDef]>) {
+    const path = childPath(node, name);
+    const tracks = new Map<string, Array<[number, number, Ease]>>();
+    let last = -Infinity;
+    for (const { t, pose, ease = m.ease ?? "linear" } of m.keys) {
+      if (!EASES.includes(ease)) {
+        throw new CadError("BAD_MOTION", `Motion "${path}" has no ease "${ease}"`, m.src, `Eases: ${EASES.join(", ")}`);
+      }
+      if (!Number.isFinite(t) || t < 0 || t <= last) {
+        throw new CadError("BAD_MOTION", `Motion "${path}" has key t=${t} after t=${last}`, m.src, "Keys need t >= 0, rising.");
+      }
+      last = t;
+      for (const [rel, value] of Object.entries(pose)) {
+        const joint = childPath(node, rel);
+        const j = named.find(([p]) => p === joint)?.[1];
+        if (!j) {
+          throw new CadError("NO_SUCH_JOINT", `Motion "${path}" moves no joint "${rel}"`, m.src, `Joints: ${named.map(([p]) => p).join(", ") || "none"}`);
+        }
+        if (!(value >= j.min && value <= j.max)) {
+          throw new CadError("JOINT_OUT_OF_RANGE", `Motion "${path}" sets "${rel}" to ${value}, outside ${j.min} to ${j.max}`, m.src);
+        }
+        if (!tracks.has(joint)) tracks.set(joint, []);
+        tracks.get(joint)!.push([t, value, ease]);
+      }
+    }
+    if (tracks.size === 0) throw new CadError("BAD_MOTION", `Motion "${path}" moves no joints`, m.src);
+    out.push({ path, duration: last, tracks: [...tracks].map(([joint, keys]) => ({ joint, keys })), src: m.src });
+  }
+  for (const c of node.children.values()) collectMotions(c, named, out);
+}
 function collectLinks(node: Node, out: Link[]) {
   const links: Link[] = [
     ...node.inst.mates.map((m) => ({ m, scope: node })),
@@ -1461,6 +1501,8 @@ export async function build(
     }
     pose.set(path, value);
   }
+  const motions: MotionResult[] = [];
+  collectMotions(top, named, motions);
   /** The path of a joint as seen from a check's place. */
   const jointPathIn = (scope: Node, joint: JointDef) =>
     named.find(([p, j]) => j === joint && (scope.path === "" || p.startsWith(`${scope.path}/`)))?.[0];
@@ -1520,7 +1562,7 @@ export async function build(
         const solo = tree(origin, "");
         const checks = origin.checks.length ? checksOf(solo, () => b!.shape, new Map()) : [];
         opts.store.put(origin, b, {
-          model: { type: origin.typeName, parts: [b.part], assemblies: [], joints: [], checks, hash: hashOf([b.part], [b.mesh]) },
+          model: { type: origin.typeName, parts: [b.part], assemblies: [], joints: [], motions: [], checks, hash: hashOf([b.part], [b.mesh]) },
           meshes: [b.mesh], shapes: new Map([["", b.shape]]), stepMeshes: new Map(b.steps ? [["", b.steps]] : []),
         });
       }
@@ -1557,7 +1599,7 @@ export async function build(
   collectAssemblies(top, assemblies);
   return {
     model: {
-      type: root.typeName, parts, assemblies, joints: solved.joints, ...(solved.ground !== undefined && { ground: solved.ground }),
+      type: root.typeName, parts, assemblies, joints: solved.joints, motions, ...(solved.ground !== undefined && { ground: solved.ground }),
       checks, hash: hashOf(parts, meshes),
     },
     meshes, shapes, stepMeshes,

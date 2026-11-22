@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  assembly, box, check, circle, closedSpline, cone, cylinder, edges, extrude, helix, importStep, knurl, loft, mate, minClearance, noCollision, offset, onFace, outerTangent, part, path,
+  assembly, box, check, circle, closedSpline, cone, cylinder, edges, extrude, helix, importStep, knurl, loft, mate, minClearance, motion, noCollision, offset, onFace, outerTangent, part, path,
   plane, polygon, port, rect, revolute, revolve, roundedRect, slider, sphere, spine, sweep, thread, world,
 } from "../src/index.ts";
 import { build, CadError, getKernel, type KeptFeature, type PartStore } from "../src/eval.ts";
@@ -689,6 +689,21 @@ test("a slider moves along the fixed port, and out-of-range values are errors", 
   assert.equal((await z(30)) - (await z(5)), 25);
   await assert.rejects(build(rail(), { pose: { lift: 51 } }), (e: CadError) => e.code === "JOINT_OUT_OF_RANGE");
   await assert.rejects(build(rail(), { pose: { nope: 1 } }), (e: CadError) => e.code === "NO_SUCH_JOINT" && /lift/.test(e.hint!));
+});
+
+test("a motion becomes per-joint tracks by full path, and is checked against its joints", async () => {
+  const rail = (keys: Parameters<typeof motion>[0]) => assembly("Rail", () => {
+    const a = bar(), b = bar();
+    return { parts: { a, b }, joints: { lift: slider(a.port("tip"), b.port("hub"), { min: 0, max: 50 }) }, motions: { up: motion(keys) } };
+  })();
+  const { model } = await build(rail([{ t: 0, pose: { lift: 0 } }, { t: 2, pose: { lift: 50 } }]));
+  assert.deepEqual(model.motions.map((m) => [m.path, m.duration, m.tracks]), [["up", 2, [{ joint: "lift", keys: [[0, 0, "linear"], [2, 50, "linear"]] }]]]);
+  const eased = (await build(rail([{ t: 0, pose: { lift: 0 } }, { t: 1, pose: { lift: 9 }, ease: "step" }]))).model.motions[0]!;
+  assert.equal(eased.tracks[0]!.keys[1]![2], "step");
+  await assert.rejects(build(rail([{ t: 0, pose: { lift: 0 }, ease: "bounce" as any }])), (e: CadError) => e.code === "BAD_MOTION");
+  await assert.rejects(build(rail([{ t: 0, pose: { lift: 60 } }])), (e: CadError) => e.code === "JOINT_OUT_OF_RANGE");
+  await assert.rejects(build(rail([{ t: 0, pose: { nope: 1 } }])), (e: CadError) => e.code === "NO_SUCH_JOINT");
+  await assert.rejects(build(rail([{ t: 1, pose: { lift: 1 } }, { t: 1, pose: { lift: 2 } }])), (e: CadError) => e.code === "BAD_MOTION");
 });
 
 test("ground fixes a part facing the world frame, and joints move the parts away from it", async () => {

@@ -217,6 +217,10 @@ button { font: inherit; color: inherit; }
 #source .line.at { background: var(--hover); box-shadow: inset 2px 0 var(--accent); }
 #source .num { flex: 0 0 32px; padding-right: var(--s2); color: var(--muted); text-align: right; user-select: none; }
 
+.motion .row { align-items: center; gap: var(--s1); }
+.motion .row svg { width: 14px; height: 14px; flex: none; }
+.motion .row .on, .motion .row[aria-pressed="true"] .off { display: none; }
+.motion .row[aria-pressed="true"] .on { display: block; color: var(--accent); }
 .joint { padding: 0 var(--s2); }
 .joint-head { display: flex; align-items: center; gap: var(--s1); }
 .joint-head .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
