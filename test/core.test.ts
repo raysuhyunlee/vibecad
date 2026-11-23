@@ -724,6 +724,23 @@ test("ground fixes a part facing the world frame, and joints move the parts away
   await assert.rejects(build(misplaced()), (e: CadError) => e.code === "BAD_MATE");
 });
 
+test("the assembly sequence puts each part after the one it mates to, in the order parts are placed", async () => {
+  const chain = assembly("Chain", () => {
+    const c = bar(), a = bar(), b = bar();
+    return { parts: { c, a, b }, ground: mate(world, b.port("hub")), mates: [mate(a.port("tip"), c.port("hub")), mate(b.port("tip"), a.port("hub"))] };
+  });
+  const { sequence } = (await build(chain())).model;
+  assert.deepEqual(sequence.map((s) => [s.part, s.on]), [["b", undefined], ["a", "b"], ["c", "a"]]);
+  assert.deepEqual(sequence[0]!.axis, [0, 0, 1]);
+  assert.ok(sequence.every((s) => s.axis && Math.hypot(...s.axis) > 0.999));
+
+  const loose = assembly("Loose", () => {
+    const a = bar(), b = bar();
+    return { parts: { a, b }, mates: [mate(a.port("tip"), b.port("hub"))] };
+  });
+  assert.deepEqual((await build(loose())).model.sequence, [{ part: "a" }, { part: "b", on: "a", axis: [0, 0, 1] }]);
+});
+
 test("a closed loop of joints is refused", async () => {
   const loop = assembly("Loop", () => {
     const a = bar(), b = bar();

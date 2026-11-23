@@ -74,6 +74,8 @@
 - ground: an assembly's `ground: mate(world, port)` fixes that part facing the world frame (origin, +z up, x along +X), with `gap` and `angle` as in a mate; only the entry's ground counts, and `world` anywhere else is `BAD_MATE`
 - joints: `revolute(a, b, { angle, min, max, gap })`, default range -180 to 180; `slider(a, b, { min, max, travel, angle })`; both are named in an assembly's `joints`
 - motions: `motion([{ t, pose }, ...])` animates joints through keyframes, `t` in seconds rising from 0, `pose` by joint path from its assembly; each joint eases between the keys that set it and holds outside them; `ease` (`linear in out inOut step`, cubic, `step` jumps at the key) shapes the way into a key, set per key or as `motion(keys, { ease })`, `linear` by default; named in an assembly's `motions`, a path like a joint's. A bad `t` or ease, or an empty motion, is `BAD_MOTION`; an unknown joint or out-of-range value is `NO_SUCH_JOINT` or `JOINT_OUT_OF_RANGE`
+- assembly sequence: every assembly has one, derived from its links with no source of its own; a part goes in once the part it mates or joints to is in, and of the parts ready, the first in the leaf order of `parts` goes first; the ground part, or else the first part, starts it
+- each step comes in along its link's fixed port +z at the build pose, the direction a positive gap separates; a grounded part comes in along world +z; `model.json` carries it as `sequence: [{ part, on, axis }]`, and build output lists the part paths
 - a joint's value lives in the source; `--pose` and the viewer only override it. Its path is `sub/name`, and a value outside its range is an error
 - a positive angle turns the moving part about its own port's +z; a positive travel separates the ports along the fixed port's +z
 - instance: a `.cad.ts` file's default export, `export default Bracket({ ... })`; without one it is `BAD_ENTRY`, and a second exported instance is `MANY_INSTANCES`
@@ -168,6 +170,8 @@
 - other `.ts` files are plain code: not listed, but saving one rebuilds
 - the left panel has a slider per joint; moving one changes the view without a rebuild, using the joint data in `model.json`, and never writes the source
 - above the sliders, a row per motion toggles playing it in a loop over the view's pose; one plays at a time, and moving a slider, resetting one or switching tabs stops it where it is
+- an assembly of two or more parts gets an `Assembly` row first, which plays its sequence once over the view's pose: parts not in yet are hidden, and each in turn slides 0.6 s into place from a few of its own sizes away, at least a quarter of the model's diagonal, 0.8 s per part; it ends on the whole model
+- the assembly plays like a motion: one plays at a time, and anything that stops a motion, previewing a feature step, or pressing it again stops it and shows the whole model; it starts by clearing the picks
 - the viewer's pose stays with its tab through rebuilds; a message carries the joints moved away from the source
 - while the tab on screen builds, the view says so, the same for a first build and a rebuild over the kept model
 - a tab's first build fits the camera to the model; a rebuild keeps the camera unless the model's bounds change, then fits again keeping the view direction
@@ -292,3 +296,4 @@
 - 2026-11-17: update the desktop app from GitHub releases; Windows gets an installer
 - 2026-11-22: ask before downloading an update, since a release is over 200MB
 - 2026-11-22: animate joints with named motions, played from the viewer
+- 2026-11-23: play an assembly's sequence, derived from its links, from the viewer

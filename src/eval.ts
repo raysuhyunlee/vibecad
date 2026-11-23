@@ -94,6 +94,14 @@ export interface MotionResult {
   tracks: Array<{ joint: string; keys: Array<[number, number, Ease]> }>;
   src: Src;
 }
+/** One part's turn in the assembly sequence: it slides in against `axis`, its mate's fixed port +z at the build pose. */
+export interface SequenceStep {
+  part: string;
+  /** The part it lands on; absent for the first part. */
+  on?: string;
+  /** Unit direction the part comes in from; absent for a first part with no ground. */
+  axis?: Vec3;
+}
 export interface MeshData {
   path: string;
   positions: Float32Array;
@@ -140,6 +148,8 @@ export interface Model {
   /** Ordered from the fixed part outward, so a joint comes after those that carry it. */
   joints: JointResult[];
   motions: MotionResult[];
+  /** Assembly order: each part after the one it mates to, else in the order parts are placed. */
+  sequence: SequenceStep[];
   /** Path of the part fixed to the world by the entry's ground. */
   ground?: string;
   checks: CheckResult[];
@@ -1190,7 +1200,7 @@ function collectLinks(node: Node, out: Link[]) {
 }
 
 /** Places every part as one tree of links, growing outward from the ground, or else the first part. */
-function solve(root: Node, leaves: Node[], pose: Pose): { at: Map<Node, Mat>; joints: JointResult[]; ground?: string } {
+function solve(root: Node, leaves: Node[], pose: Pose): { at: Map<Node, Mat>; joints: JointResult[]; sequence: SequenceStep[]; ground?: string } {
   const pending: Link[] = [];
   collectLinks(root, pending);
 
@@ -1209,6 +1219,7 @@ function solve(root: Node, leaves: Node[], pose: Pose): { at: Map<Node, Mat>; jo
   }
   const placed = new Map<Node, Mat>([[fixed, IDENTITY]]);
   const parent = new Map<Node, Node>();
+  const approach = new Map<Node, Vec3>();
   const joints: Array<{ result: JointResult; moving: Node }> = [];
 
   const place = ({ m, scope, path }: Link) => {
@@ -1248,6 +1259,7 @@ function solve(root: Node, leaves: Node[], pose: Pose): { at: Map<Node, Mat>; jo
     const target = mul(facing, [cs, -sn, 0, 0, sn, cs, 0, 0, 0, 0, 1, 0]);
     placed.set(moving.leaf, mul(target, invert(frame(moving.def.at, moving.def.z, moving.def.x))));
     parent.set(moving.leaf, fixed.leaf);
+    approach.set(moving.leaf, [world[2]!, world[6]!, world[10]!].map(round) as Vec3);
 
     if (isJoint(m)) {
       const axisOf = (f: Mat): Vec3 => [f[2]!, f[6]!, f[10]!].map(round) as Vec3;
@@ -1291,7 +1303,18 @@ function solve(root: Node, leaves: Node[], pose: Pose): { at: Map<Node, Mat>; jo
       })
       .map((leaf) => leaf.path);
   }
-  return { at: placed, joints: joints.map((j) => j.result), ...(grounded !== undefined && { ground: grounded }) };
+  return { at: placed, joints: joints.map((j) => j.result), sequence: sequenceOf(leaves, parent, approach), ...(grounded !== undefined && { ground: grounded }) };
+}
+/** Each part goes in once the part it mates to is in; of those ready, the first placed goes first. */
+function sequenceOf(leaves: Node[], parent: Map<Node, Node>, approach: Map<Node, Vec3>): SequenceStep[] {
+  const done = new Set<Node>([WORLD_NODE]), out: SequenceStep[] = [];
+  const ready = (l: Node) => !done.has(l) && (!parent.has(l) || done.has(parent.get(l)!));
+  for (let next = leaves.find(ready); next; next = leaves.find(ready)) {
+    done.add(next);
+    const on = parent.get(next), axis = approach.get(next);
+    out.push({ part: next.path, ...(on && on !== WORLD_NODE && { on: on.path }), ...(axis && { axis }) });
+  }
+  return out;
 }
 
 // --- Build ------------------------------------------------------------------
@@ -1562,7 +1585,7 @@ export async function build(
         const solo = tree(origin, "");
         const checks = origin.checks.length ? checksOf(solo, () => b!.shape, new Map()) : [];
         opts.store.put(origin, b, {
-          model: { type: origin.typeName, parts: [b.part], assemblies: [], joints: [], motions: [], checks, hash: hashOf([b.part], [b.mesh]) },
+          model: { type: origin.typeName, parts: [b.part], assemblies: [], joints: [], motions: [], sequence: [{ part: b.part.path }], checks, hash: hashOf([b.part], [b.mesh]) },
           meshes: [b.mesh], shapes: new Map([["", b.shape]]), stepMeshes: new Map(b.steps ? [["", b.steps]] : []),
         });
       }
@@ -1599,7 +1622,7 @@ export async function build(
   collectAssemblies(top, assemblies);
   return {
     model: {
-      type: root.typeName, parts, assemblies, joints: solved.joints, motions, ...(solved.ground !== undefined && { ground: solved.ground }),
+      type: root.typeName, parts, assemblies, joints: solved.joints, motions, sequence: solved.sequence, ...(solved.ground !== undefined && { ground: solved.ground }),
       checks, hash: hashOf(parts, meshes),
     },
     meshes, shapes, stepMeshes,

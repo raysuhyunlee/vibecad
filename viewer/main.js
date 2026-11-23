@@ -54,6 +54,7 @@ const flashMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: 
 // --- State ------------------------------------------------------------------
 let model = null;
 let parts = new Map(); // path -> { info, mesh, edges, groups, geometry, matrix }
+let assemblyAt = null; // part path -> offset while assembling, null for a part not in yet
 let pose = {}; // joint path -> value the person set; kept by tab, never written to the source
 let stepMeshes = {};
 let selectedPart = null;
@@ -806,7 +807,7 @@ function frame(now) {
     if (!r.el) continue;
     const s = project(r.point);
     r.el.style.transform = `translate(${s.x}px, ${s.y}px)`;
-    r.el.style.visibility = s.front ? "visible" : "hidden";
+    r.el.style.visibility = s.front && !assemblyHides(r.part) ? "visible" : "hidden";
   }
 }
 requestAnimationFrame(frame);
@@ -868,6 +869,10 @@ function applyPose() {
         .multiply(pivot.makeTranslation(-ox, -oy, -oz));
     } else step.makeTranslation(axis.x * delta, axis.y * delta, axis.z * delta);
     for (const path of j.moves) parts.get(path).matrix.multiply(step);
+  }
+  // A part going in sits off its place along its mate axis, in the build frame, so it follows the pose.
+  for (const [path, off] of assemblyAt ?? []) {
+    if (off) parts.get(path)?.matrix.multiply(step.makeTranslation(off.x, off.y, off.z));
   }
   world.updateMatrixWorld(true);
   for (const r of refs) {
@@ -964,6 +969,7 @@ const motionAt = (keys, t) => {
 };
 function stepMotion(now) {
   if (!playing) return;
+  if (playing.assembly) return stepAssembly(now);
   const m = (model?.motions ?? []).find((x) => x.path === playing.path);
   if (!m) return stopMotion();
   const t = m.duration > 0 ? ((now - playing.start) / 1000) % m.duration : 0;
@@ -973,8 +979,65 @@ function stepMotion(now) {
 }
 function stopMotion() {
   if (!playing) return;
+  const was = playing;
   playing = null;
   for (const b of document.querySelectorAll(".motion button")) b.setAttribute("aria-pressed", "false");
+  if (was.assembly) {
+    // Stopping the assembly shows the whole model again, at the pose.
+    assemblyAt = null;
+    for (const o of world.children) o.visible = true;
+    applyPose();
+    paintParts();
+  }
+}
+
+// --- Assembly: parts go in one by one, in the build's sequence --------------
+const ASSEMBLY_STEP = 0.8; // s per part
+const ASSEMBLY_SLIDE = 0.6; // s of each step spent sliding in
+const assemblyDuration = () => (model?.sequence?.length ?? 0) * ASSEMBLY_STEP;
+const assemblyHides = (path) => !!assemblyAt && assemblyAt.has(path) && !assemblyAt.get(path);
+
+/** How far a part starts from its place: a few of its own sizes, at least a share of the model's. */
+function approachDistance(path, reach) {
+  const g = parts.get(path)?.geometry;
+  if (!g) return 0;
+  if (!g.boundingSphere) g.computeBoundingSphere();
+  return Math.max(3 * g.boundingSphere.radius, 0.25 * reach);
+}
+function stepAssembly(now) {
+  const seq = model?.sequence ?? [];
+  const t = (now - playing.start) / 1000;
+  if (t >= assemblyDuration()) return stopMotion();
+  assemblyAt = new Map();
+  seq.forEach((s, i) => {
+    const u = (t - i * ASSEMBLY_STEP) / ASSEMBLY_SLIDE;
+    if (u < 0) return assemblyAt.set(s.part, null);
+    const k = (1 - EASE.out(Math.min(u, 1))) * (s.axis ? approachDistance(s.part, playing.reach) : 0);
+    assemblyAt.set(s.part, new THREE.Vector3(...(s.axis ?? [0, 0, 0])).multiplyScalar(k));
+  });
+  applyPose();
+  // Overlays share their part's matrix, so they hide with it.
+  const hidden = new Set([...assemblyAt].filter(([, off]) => !off).map(([path]) => parts.get(path)?.matrix));
+  for (const o of world.children) o.visible = !hidden.has(o.matrix);
+}
+function assemblyRow() {
+  const b = row("Assembly", `${jointNumber(assemblyDuration())}s`, false, () => {
+    const on = !playing?.assembly;
+    stopMotion();
+    if (on) {
+      setPreview(null);
+      clearMeasure();
+      playing = { assembly: true, start: performance.now(), reach: modelBox().getSize(new THREE.Vector3()).length() };
+    }
+    b.setAttribute("aria-pressed", String(on));
+  });
+  b.title = "Play the assembly sequence";
+  b.setAttribute("aria-pressed", String(!!playing?.assembly));
+  b.insertAdjacentHTML("afterbegin", '<svg aria-hidden="true" class="off"><use href="#i-play"/></svg><svg aria-hidden="true" class="on"><use href="#i-pause"/></svg>');
+  const el = document.createElement("div");
+  el.className = "motion";
+  el.append(b);
+  return el;
 }
 function motionRow(m) {
   const b = row(m.path, `${jointNumber(m.duration)}s`, false, () => {
@@ -1065,9 +1128,10 @@ function renderDesign() {
   }
   if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
   $("parts").replaceChildren(...partRows());
-  $("joints").hidden = model.joints.length === 0;
+  const assembles = (model.sequence?.length ?? 0) > 1;
+  $("joints").hidden = model.joints.length === 0 && !assembles;
   jointShows = [];
-  $("joints").replaceChildren(...(model.motions ?? []).map(motionRow), ...model.joints.map(jointRow));
+  $("joints").replaceChildren(...(assembles ? [assemblyRow()] : []), ...(model.motions ?? []).map(motionRow), ...model.joints.map(jointRow));
   const part = selectedPart !== null ? parts.get(selectedPart) : null;
   const steps = $("steps");
   steps.hidden = !part;
@@ -1110,6 +1174,7 @@ function stepLabel(s, steps) {
 }
 /** Shows the part as it was at one step of its feature history. */
 function setPreview(id) {
+  if (id !== null && playing?.assembly) stopMotion();
   previewStep = id;
   if (previewObject) {
     world.remove(previewObject);
