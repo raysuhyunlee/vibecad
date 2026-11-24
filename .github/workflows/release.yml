@@ -10,9 +10,15 @@ jobs:
   draft:
     runs-on: ubuntu-latest
     steps:
-      - name: Create draft with download links
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # What's New lists commit subjects since the previous tag as a draft to edit before publishing.
+      - name: Create draft with download links and What's New
         run: |
           if gh release view "$GITHUB_REF_NAME"; then exit 0; fi
+          prev=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          changes=$(git log --no-merges --format='- %s' ${prev:+"$prev.."}"$GITHUB_REF_NAME" | grep -v '^- Bump to ' || true)
           version="${GITHUB_REF_NAME#v}"
           base="https://github.com/$GH_REPO/releases/download/$GITHUB_REF_NAME"
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
@@ -23,6 +29,10 @@ jobs:
           - [Linux (64-bit AppImage)]($base/Vibecad-$version-x86_64.AppImage)
 
           On Linux, mark the AppImage as executable before opening it.
+
+          ## What's New
+
+          $changes
           EOF
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$version" --generate-notes --notes-file "$RUNNER_TEMP/release-notes.md"
         env:
