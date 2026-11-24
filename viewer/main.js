@@ -82,6 +82,10 @@ const LAST_OPENED = "vibecad.lastOpened";
 const photo = { name: null, doc: null, mode: "edit", edited: new Set(), removed: new Set(), drag: null };
 let photoList = []; // { name, entry } of every image in the project
 const added = new Set(); // images added since the last send; they go with the next message
+const drafts = new Map(); // name -> { dims, edited, removed }: unsent dims of images not open
+let view = "model"; // "model" or "images", the image browser
+let lastPhoto = null; // the image to reopen when going back to the images
+let shownEntry = null; // the file the view last showed
 
 function decode(b64, Type) {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -1546,7 +1550,7 @@ function renderTree() {
   $("tree").replaceChildren(...rows);
 }
 function renderEmpty() {
-  const blank = !!opened.tabs.find((t) => t.file === opened.entry)?.empty && !photo.name;
+  const blank = !!opened.tabs.find((t) => t.file === opened.entry)?.empty && view === "model";
   const text = !opened.root || blank ? "" : !opened.entry ? "Create or select a file" : buildPending ? "Building..." : "";
   $("open-first").hidden = !!opened.root;
   $("empty-file").hidden = !blank;
@@ -1602,7 +1606,10 @@ function renderTabs() {
 function applyEntry(e) {
   // A tab without a fresh build shows nothing, the one on screen too.
   const stale = (file) => !e.tabs.find((t) => t.file === file)?.version;
-  if (e.entry !== opened.entry) showView(e.entry);
+  if (e.entry !== opened.entry) {
+    showView(e.entry);
+    lastPhoto = null;
+  }
   opened = { ...opened, entry: e.entry, tabs: e.tabs };
   for (const file of [...views.keys()]) {
     if (!stale(file)) continue;
@@ -1623,7 +1630,9 @@ function applyEntry(e) {
   }
   buildPending = !!e.entry && e.building === e.entry;
   if (photo.name && photo.doc?.entry !== e.entry) closePhoto(); // an image belongs to its file
-  renderPhotoList();
+  if (!photo.name && e.entry !== shownEntry) view = "model";
+  shownEntry = e.entry;
+  renderGallery();
   renderAdded();
   updateSend();
   renderTabs();
@@ -1648,6 +1657,7 @@ function applyProject(e) {
     opened.entry = null;
     closePhoto();
     added.clear();
+    drafts.clear();
   }
   opened = { ...opened, root: e.root, name: e.name, files: e.files, truncated: e.truncated };
   photoList = e.photos ?? [];
@@ -1729,43 +1739,174 @@ const PHOTO_PX = 1568; // the agent sees an image this size or smaller as is, so
 const PHOTO_AREA = 1.15e6;
 const photoDirty = () => !!photo.name && (photo.edited.size > 0 || photo.removed.size > 0);
 
-function renderPhotoList() {
-  $("photos").hidden = !opened.entry;
-  const mine = photoList.filter((p) => p.entry === opened.entry).map((p) => p.name);
-  const rows = mine.map((name) => row(name, "", name === photo.name, () => (name === photo.name ? closePhoto() : openPhoto(name))));
-  if (!rows.length) rows.push(note("Add or drop a photo or sketch to model this file from it"));
-  $("photo-list").replaceChildren(...rows);
+const photoUrl = (name) => `/photo/image?name=${encodeURIComponent(name)}`;
+/** The dims the agent asks on an image that the person has not filled yet, unsent edits counted. */
+function askedOn(name) {
+  const dims = name === photo.name ? photo.doc?.dims : drafts.get(name)?.dims;
+  return dims ? dims.filter((d) => d.value == null).length : photoList.find((p) => p.name === name)?.asked ?? 0;
+}
+function askedBadge(name) {
+  const b = document.createElement("span");
+  b.className = "asked-badge";
+  b.dataset.asked = name;
+  return b;
+}
+/** Marks each image that still needs dims; cheap enough to run on every keystroke. */
+function renderAsked() {
+  for (const b of document.querySelectorAll("[data-asked]")) {
+    const n = askedOn(b.dataset.asked);
+    b.hidden = !n;
+    b.textContent = b.closest("#strip-list") ? n : `${n} to measure`;
+    b.title = `${n} ${n === 1 ? "dimension" : "dimensions"} to measure`;
+  }
+}
+const photosHere = () => photoList.filter((p) => p.entry === opened.entry).map((p) => p.name);
+/** The images with dims changed since the last send, the open one included. */
+const dimsChanged = () => [...new Set([...photosHere().filter((name) => drafts.has(name)), ...(photoDirty() ? [photo.name] : [])])];
+
+/** The image browser: a grid of the file's images, or a strip of them over the open one. */
+function renderGallery() {
+  if (!opened.entry) view = "model";
+  const images = view === "images";
+  const names = opened.entry ? photosHere() : [];
+  const open = !!photo.name;
+  $("gallery").hidden = !images;
+  $("gallery").classList.toggle("overlay", open && photo.mode === "overlay");
+  $("grid").hidden = open;
+  $("strip").hidden = $("photo").hidden = !open;
+  $("photo-bar").hidden = !opened.entry || (!names.length && !images);
+  $("show-model").setAttribute("aria-pressed", !images);
+  $("show-images").setAttribute("aria-pressed", images);
+  $("show-images").textContent = names.length ? `Images (${names.length})` : "Images";
+  $("photo-modes").hidden = !open;
+  $("photo-opacity").hidden = !open || photo.mode !== "overlay";
+  if (images && !open) $("grid").replaceChildren(...names.map(gridTile), addTile());
+  if (open) {
+    $("strip-list").replaceChildren(...names.map(stripThumb));
+    $("strip-list").querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  renderAsked();
+  renderPhotoSend();
   renderEmpty();
+}
+/** The browser's send: active when there are new images or changed dims. */
+function renderPhotoSend() {
+  const b = $("photo-send");
+  const n = addedHere().length;
+  b.hidden = view !== "images";
+  b.textContent = n ? `Model from ${n === 1 ? "new image" : `${n} new images`}` : "Update model";
+  b.disabled = !n && !dimsChanged().length;
+}
+function gridTile(name) {
+  const box = document.createElement("div");
+  box.className = "tile";
+  const open = document.createElement("button");
+  open.type = "button";
+  open.title = `Open ${name}`;
+  const frame = document.createElement("div");
+  frame.className = "frame";
+  const img = document.createElement("img");
+  img.alt = "";
+  img.src = photoUrl(name);
+  frame.append(img, askedBadge(name));
+  const caption = document.createElement("span");
+  caption.className = "caption";
+  caption.textContent = name;
+  open.append(frame, caption);
+  open.onclick = () => openPhoto(name);
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "icon";
+  del.title = del.ariaLabel = `Delete ${name}`;
+  del.innerHTML = '<svg><use href="#i-x"/></svg>';
+  del.onclick = () => deletePhoto(name);
+  box.append(open, del);
+  return box;
+}
+function addTile() {
+  const box = document.createElement("div");
+  box.className = "tile add";
+  const b = document.createElement("button");
+  b.type = "button";
+  b.innerHTML = '<svg><use href="#i-plus"/></svg><span>Add or drop a photo or sketch</span>';
+  b.onclick = () => $("photo-file").click();
+  box.append(b);
+  return box;
+}
+function stripThumb(name) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.title = b.ariaLabel = name;
+  if (name === photo.name) b.setAttribute("aria-current", "true");
+  const img = document.createElement("img");
+  img.alt = "";
+  img.src = photoUrl(name);
+  b.append(img, askedBadge(name));
+  b.onclick = () => openPhoto(name);
+  return b;
+}
+function setView(v) {
+  if (!opened.entry) return;
+  if (v === "model") {
+    lastPhoto = photo.name;
+    view = "model";
+    if (photo.name) return closePhoto();
+  } else {
+    view = "images";
+    if (!photo.name && lastPhoto && photosHere().includes(lastPhoto)) return openPhoto(lastPhoto);
+  }
+  renderGallery();
+}
+async function deletePhoto(name) {
+  if (!confirm(`Delete ${name} and its dimensions from the project?`)) return;
+  const res = await post("/photo/delete", { name });
+  if (!res.ok) return showBanner({ message: (await res.json()).error });
+  photoList = photoList.filter((p) => p.name !== name);
+  added.delete(name);
+  drafts.delete(name);
+  if (lastPhoto === name) lastPhoto = null;
+  renderAdded();
+  renderGallery();
 }
 async function fetchPhoto(name) {
   const res = await fetch(`/photo?name=${encodeURIComponent(name)}`);
   return res.ok ? res.json() : null;
 }
+/** Takes the saved doc, keeping the person's unsent edits. */
+function mergeDims(doc, { dims, edited, removed }) {
+  const mine = new Map(dims.filter((d) => edited.has(d.id)).map((d) => [d.id, d]));
+  doc.dims = doc.dims.filter((d) => !removed.has(d.id)).map((d) => mine.get(d.id) ?? d);
+  for (const [id, d] of mine) if (!doc.dims.some((x) => x.id === id)) doc.dims.push(d);
+  return doc;
+}
+/** Keeps the open image's unsent dims when it closes, to send later. */
+function keepDraft() {
+  if (photoDirty()) drafts.set(photo.name, { dims: photo.doc.dims, edited: new Set(photo.edited), removed: new Set(photo.removed) });
+}
 async function openPhoto(name) {
   const doc = await fetchPhoto(name);
   if (!doc) return;
-  Object.assign(photo, { name, doc });
-  photo.edited.clear();
-  photo.removed.clear();
-  $("photo-img").src = `/photo/image?name=${encodeURIComponent(name)}`;
+  keepDraft();
+  const draft = drafts.get(name);
+  drafts.delete(name);
+  Object.assign(photo, { name, doc: draft ? mergeDims(doc, draft) : doc, drag: null, edited: draft?.edited ?? new Set(), removed: draft?.removed ?? new Set() });
+  $("photo-img").src = photoUrl(name);
+  view = "images";
   setPhotoMode("edit");
-  renderPhotoList();
   updateSend();
 }
 function closePhoto() {
-  Object.assign(photo, { name: null, doc: null, drag: null });
-  $("photo").hidden = $("photo-bar").hidden = true;
-  renderPhotoList();
+  keepDraft();
+  Object.assign(photo, { name: null, doc: null, drag: null, edited: new Set(), removed: new Set() });
+  renderGallery();
   updateSend();
 }
 function setPhotoMode(mode) {
   photo.mode = mode;
-  $("photo").hidden = $("photo-bar").hidden = !photo.name;
-  $("photo").classList.toggle("overlay", mode === "overlay");
   $("photo").style.opacity = mode === "overlay" ? $("photo-opacity").value : "";
   $("photo-edit").setAttribute("aria-pressed", mode === "edit");
   $("photo-overlay").setAttribute("aria-pressed", mode === "overlay");
-  $("photo-opacity").hidden = mode !== "overlay";
+  renderGallery();
   renderPhoto();
 }
 /** The agent rewrote the image's json: take it, keeping the person's unsent edits. */
@@ -1773,17 +1914,16 @@ async function photosChanged(e) {
   photoList = e.photos;
   for (const name of added) if (!photoList.some((p) => p.name === name)) added.delete(name);
   renderAdded();
+  for (const name of drafts.keys()) if (!photoList.some((p) => p.name === name)) drafts.delete(name);
   const open = photoList.find((p) => p.name === photo.name);
   if (photo.name && open?.entry !== opened.entry) closePhoto();
-  renderPhotoList();
+  renderGallery();
   if (!photo.name || !e.changed.includes(photo.name) || photo.drag) return;
   const name = photo.name;
   const doc = await fetchPhoto(name);
   if (!doc || photo.name !== name) return;
-  const mine = new Map(photo.doc.dims.filter((d) => photo.edited.has(d.id)).map((d) => [d.id, d]));
-  doc.dims = doc.dims.filter((d) => !photo.removed.has(d.id)).map((d) => mine.get(d.id) ?? d);
-  for (const [id, d] of mine) if (!doc.dims.some((x) => x.id === id)) doc.dims.push(d);
-  photo.doc = doc;
+  photo.doc = mergeDims(doc, { dims: photo.doc.dims, edited: photo.edited, removed: photo.removed });
+  renderAsked();
   renderPhoto();
   updateSend();
 }
@@ -1799,6 +1939,7 @@ function svgEl(tag, attrs) {
 }
 function editDim(d) {
   photo.edited.add(d.id);
+  renderAsked();
   updateSend();
 }
 const unitOf = (d) => (d.kind === "angle" ? "°" : "mm");
@@ -1847,6 +1988,7 @@ function dimLabel(d) {
     photo.edited.delete(d.id);
     photo.removed.add(d.id);
     renderPhoto();
+    renderAsked();
     updateSend();
   };
   el.append(value, unit, remove);
@@ -1962,9 +2104,9 @@ function renderAdded() {
     open.title = open.ariaLabel = `Open ${name}`;
     const img = document.createElement("img");
     img.alt = "";
-    img.src = `/photo/image?name=${encodeURIComponent(name)}`;
+    img.src = photoUrl(name);
     open.append(img);
-    open.onclick = () => (name === photo.name ? closePhoto() : openPhoto(name));
+    open.onclick = () => (name === photo.name ? setView("model") : openPhoto(name));
     const drop = document.createElement("button");
     drop.type = "button";
     drop.className = "icon";
@@ -2000,12 +2142,13 @@ async function addPhoto(file) {
   const res = await post("/photo", { name: file.name, image: c.toDataURL("image/jpeg", 0.9), size: [c.width, c.height] });
   const d = await res.json();
   if (!res.ok) return showBanner({ message: d.error });
-  if (!photoList.some((p) => p.name === d.name)) photoList.push({ name: d.name, entry: opened.entry });
+  if (!photoList.some((p) => p.name === d.name)) photoList.push({ name: d.name, entry: opened.entry, asked: 0 });
   added.add(d.name);
-  renderPhotoList();
+  view = "images"; // the browser shows what was just added
   renderAdded();
+  renderGallery();
 }
-$("add-photo").onclick = $("empty-photo").onclick = () => $("photo-file").click();
+$("empty-photo").onclick = () => $("photo-file").click();
 $("photo-file").onchange = () => {
   addPhotos([...$("photo-file").files]);
   $("photo-file").value = "";
@@ -2020,7 +2163,13 @@ stage.addEventListener("drop", (e) => {
 $("photo-edit").onclick = () => setPhotoMode("edit");
 $("photo-overlay").onclick = () => setPhotoMode("overlay");
 $("photo-opacity").oninput = () => ($("photo").style.opacity = $("photo-opacity").value);
-$("photo-close").onclick = closePhoto;
+$("show-model").onclick = () => setView("model");
+$("show-images").onclick = () => setView("images");
+$("all-photos").onclick = () => {
+  lastPhoto = null;
+  closePhoto();
+};
+$("photo-send").onclick = () => send();
 
 // --- Conversation -----------------------------------------------------------
 function addMessage(m) {
@@ -2083,6 +2232,7 @@ function updateSend() {
   send.disabled = !stop && !target;
   input.disabled = !target;
   $("mic").disabled = !target || $("composer").classList.contains("transcribing");
+  renderPhotoSend();
 }
 function insertToken(n) {
   if (listening) {
@@ -2106,21 +2256,26 @@ function payload() {
 /** Sends the draft. Added images and an open one go along, the open one with the person's dims when they changed. */
 async function send() {
   const text = input.value.trim();
-  const dirty = photoDirty();
+  const changed = dimsChanged();
   const images = addedHere();
   if (!opened.entry && !photo.name) return;
-  if (!text && !dirty && !images.length) return;
+  if (!text && !changed.length && !images.length) return;
   const body = { text, refs: payload(), pose: movedJoints(), ...(model && { screenshot: screenshot() }) };
-  if (photo.name) body.photo = { name: photo.name, ...(dirty && { dims: photo.doc.dims.map(({ id, label, a, b, value }) => ({ id, label, a, b, value })) }) };
+  if (photo.name) body.photo = { name: photo.name };
+  if (changed.length) body.dims = Object.fromEntries(changed.map((name) => [name, name === photo.name ? photo.doc.dims : drafts.get(name).dims]));
   if (images.length) body.photos = images;
   input.value = "";
   clearRefs();
   for (const name of images) added.delete(name);
   renderAdded();
   const res = await fetch("/feedback", { method: "POST", body: JSON.stringify(body) });
-  if (res.ok && dirty) {
-    photo.edited.clear();
-    photo.removed.clear();
+  if (res.ok) {
+    for (const name of changed) drafts.delete(name);
+    if (changed.includes(photo.name)) {
+      photo.edited.clear();
+      photo.removed.clear();
+    }
+    updateSend();
   }
   if (!res.ok) {
     for (const name of images) added.add(name);
@@ -2281,6 +2436,7 @@ addEventListener("keydown", (e) => {
     e.preventDefault();
     if (!e.repeat) startListening();
   } else if ((e.key === "p" || e.key === "P") && photo.name) setPhotoMode(photo.mode === "edit" ? "overlay" : "edit");
+  else if (e.key === "i" || e.key === "I") setView(view === "model" ? "images" : "model");
   else if (e.key === "d" || e.key === "D") setDraw(!drawMode);
   else if (e.key === "f" || e.key === "F") fit();
   else if (e.key === "Escape") {

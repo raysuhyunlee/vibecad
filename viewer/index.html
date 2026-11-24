@@ -54,6 +54,7 @@
       <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></symbol>
       <symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></symbol>
       <symbol id="i-history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
       <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
     </defs>
   </svg>
@@ -72,14 +73,6 @@
         </form>
         <div id="tree"></div>
       </section>
-      <section id="photos" aria-label="Reference images" hidden>
-        <header>
-          <span class="name">Images for this file</span>
-          <button id="add-photo" class="icon" aria-label="Add photo or sketch" title="Add photo or sketch"><svg><use href="#i-plus"/></svg></button>
-          <input id="photo-file" type="file" accept="image/*" multiple hidden>
-        </header>
-        <div id="photo-list"></div>
-      </section>
       <section id="joints" hidden></section>
       <section id="source" hidden></section>
       <section id="checks" hidden></section>
@@ -92,18 +85,30 @@
       <canvas id="ink"></canvas>
       <div id="pins"></div>
       <nav id="parts" aria-label="Model tree" hidden></nav>
-      <div id="photo" hidden>
-        <img id="photo-img" alt="">
-        <svg id="photo-svg"></svg>
-        <div id="photo-labels"></div>
-      </div>
+      <section id="gallery" aria-label="Reference images" hidden>
+        <div id="strip">
+          <button id="all-photos" type="button" class="icon" aria-label="All images" title="All images"><svg><use href="#i-grid"/></svg></button>
+          <div id="strip-list"></div>
+        </div>
+        <div id="grid"></div>
+        <div id="photo" hidden>
+          <img id="photo-img" alt="">
+          <svg id="photo-svg"></svg>
+          <div id="photo-labels"></div>
+        </div>
+      </section>
+      <input id="photo-file" type="file" accept="image/*" multiple hidden>
       <div id="photo-bar" hidden>
-        <div class="segmented" role="group" aria-label="Image mode">
+        <div class="segmented" role="group" aria-label="View">
+          <button id="show-model" type="button" aria-pressed="true" title="Model (I)">Model</button>
+          <button id="show-images" type="button" aria-pressed="false" title="Images (I)">Images</button>
+        </div>
+        <div id="photo-modes" class="segmented" role="group" aria-label="Image mode" hidden>
           <button id="photo-edit" type="button" aria-pressed="true" title="Draw dimensions on the image (P)">Dimensions</button>
           <button id="photo-overlay" type="button" aria-pressed="false" title="Fade the image over the model (P)">Overlay</button>
         </div>
         <input id="photo-opacity" type="range" min="0.1" max="0.9" step="0.05" value="0.5" aria-label="Image opacity" hidden>
-        <button id="photo-close" type="button" class="icon" aria-label="Close image" title="Close image"><svg><use href="#i-x"/></svg></button>
+        <button id="photo-send" type="button" class="button primary" hidden>Update model</button>
       </div>
       <div id="tip" hidden></div>
       <div id="banner" role="alert" hidden></div>

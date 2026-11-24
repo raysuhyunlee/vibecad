@@ -161,7 +161,7 @@
 - the left panel lists the root's `*.cad.ts` and STEP files, skipping dot folders and `node_modules`, and updates as files change
 - selecting a file opens it in a tab; a project opens on `main.cad.ts` when it has one
 - the new-file button takes a name or `folder/name`, creates an empty `.cad.ts` and opens it; a name that exists, leaves the root, or goes through a dot folder is refused
-- an empty file is not built: its view offers to add a photo or sketch, or to describe the part in the chat
+- an empty file is not built: its model view offers to add a photo or sketch, or to describe the part in the chat
 - a tab shows a fresh kept build without a rebuild, so a file reopened after a restart renders at once
 - a tab shown with an out-of-date build does not show it: it builds as if for the first time
 - only the tab on screen holds its build in memory; the others read theirs from disk when shown
@@ -214,11 +214,15 @@
 - `kind` is `length` (a to b, the default), `diameter` (a and b across the circle through its center), `radius` (a the center, b on the circle) or `angle` (c the vertex, a and b on each ray); values are mm, or degrees for an angle
 - a dim with `value: null` is the agent asking; a number is the person's, measured on the object or meant on a sketch, and wins over the image
 - an end point need not be exact: the label and the value carry the meaning
-- the person adds images, several at once, by the button or a drop on the view; adding starts no turn: the images wait as thumbnails above the message box, to open or leave out, and go with the next message, which needs no text
+- the person adds images, several at once, by the button or a drop on the view, the model or the images alike; adding starts no turn and shows the image browser: the images wait as thumbnails above the message box, to open or leave out, and go with the next message, which needs no text
 - with them the agent models a draft in `entry` with every dimension a named param, marks guessed ones `// estimated`, and asks for the dims it needs, each once, on the image that shows it best
 - the agent asks in rounds, the most important first; it never changes or removes a value the person gave
-- the left panel lists the images of the file on screen; opening one shows it over the view, and switching files closes it
-- photo mode: the image covers the view with its dims; the person types values, drags end points, drags on the image to add a dim, or removes one
+- a bar at the bottom of the view switches between the model and the image browser, `I` too; it shows once the file has an image; switching files goes back to the model
+- an image with asked dims the person has not filled shows their count, `N to measure` on its tile and a number on its strip thumbnail, counting unsent values as they are typed
+- the image browser shows the file's images in a grid, with a tile to add more; deleting one, after a confirm, removes its jpg and json
+- opening an image shows a strip of the file's images on top, the open one marked, and the image below; a grid button goes back to the grid; going to the model and back reopens it
+- the browser's button sends a message with no text: `Model from N new images` while there are added images, else `Update model`, enabled while some image's dims changed
+- photo mode: the image fills the space below the strip with its dims; the person types values, drags end points, drags on the image to add a dim, or removes one
 - dims are drawn CAD style, with arrows at both ends; a radius has one, on the circle; a dim the agent asks for is dashed
 - a label holds the value, with `Ø` or `R` before a diameter or radius; its name shows on hover or while typing
 - a length's label reads along its line, above or below it; when it does not fit between the arrows it goes beyond one end, and the line runs on to it; when it covers another label, a line or an end point, the line moves off its points, with extension lines
@@ -226,8 +230,9 @@
 - an angle is an arc between its rays, its label outside the arc; when the label does not fit, it goes beyond one end and the arc runs on to it; the arc grows to clear other labels, and rays reach it with extension lines
 - the person draws lengths; the agent may ask any kind
 - overlay mode: the image sits faded over the model and passes the pointer through, so the person orbits the model to match the image; the screenshot sent carries both
-- `P` switches between the two modes; closing the image goes back to the model
-- every message sent with an image open or added lists all the images of its file with their dims, as views of one object; sending saves the person's dims first, and needs no text when they changed
+- `P` switches between the two modes
+- the person's unsent dims stay with their image when another opens, and go with the next message
+- every message sent with an image open, added, or with changed dims lists all the images of its file with their dims, as views of one object; sending saves the person's dims first, and needs no text when they changed
 - an update from the agent keeps the person's unsent edits
 
 ## measuring

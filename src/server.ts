@@ -71,11 +71,14 @@ interface Photo {
   dims: Dim[];
 }
 const photoJson = (name: string) => `${PHOTOS}/${name}.json`;
-/** Each image with the file it belongs to. */
+/** Each image with the file it belongs to and how many dims the agent asks on it. */
 const listPhotos = () => {
   try {
     const names = readdirSync(PHOTOS).filter((f) => f.endsWith(".json") && PHOTO_NAME.test(f.slice(0, -5))).map((f) => f.slice(0, -5)).sort();
-    return names.map((name) => ({ name, entry: readPhoto(name)?.entry }));
+    return names.map((name) => {
+      const p = readPhoto(name);
+      return { name, entry: p?.entry, asked: p ? p.dims.filter((d) => d.value === null).length : 0 };
+    });
   } catch {
     return [];
   }
@@ -103,10 +106,10 @@ function cleanDims(list: unknown): Dim[] {
   return out;
 }
 /** What the agent needs to model a file's images and ask for dimensions over them. */
-function photoPrompt(file: string | undefined, photos: { name: string; p: Photo }[], open?: string, added: string[] = []) {
+function photoPrompt(file: string | undefined, photos: { name: string; p: Photo }[], open?: string, added: string[] = [], edited: string[] = []) {
   const n = (v: number[]) => `[${v.map(Math.round).join(",")}]`;
   const list = photos.map(({ name, p }) => {
-    const tags = [added.includes(name) && "new", name === open && "open on screen"].filter(Boolean);
+    const tags = [added.includes(name) && "new", edited.includes(name) && "dims changed", name === open && "open on screen"].filter(Boolean);
     const dims = p.dims.map((d) => {
       const at = d.kind === "angle" && d.c ? `c=${n(d.c)} a=${n(d.a)} b=${n(d.b)}` : `${n(d.a)}-${n(d.b)}`;
       const value = d.value === null ? "asked" : `= ${d.value} ${d.kind === "angle" ? "deg" : "mm"}`;
@@ -608,6 +611,15 @@ export async function serve(o: {
         writeFileSync(photoJson(name), JSON.stringify({ image: `${name}.jpg`, size, entry, dims: [] } satisfies Photo, null, 2) + "\n");
         return json(res, { name });
       }
+      if (path === "/photo/delete") {
+        const name = JSON.parse(await readBody(req)).name;
+        const p = readPhoto(name);
+        if (!p) return json(res, { error: "That image is no longer in the project." }, 404);
+        const image = resolve(PHOTOS, String(p.image));
+        if (inside(resolve(PHOTOS), image)) rmSync(image, { force: true });
+        rmSync(photoJson(name), { force: true });
+        return json(res, { ok: true });
+      }
       if (path === "/feedback") {
         const b = JSON.parse(await readBody(req));
         const photoName = typeof b.photo?.name === "string" ? b.photo.name : undefined;
@@ -616,11 +628,16 @@ export async function serve(o: {
         if (!entry && !photo) return json(res, { error: "Open a file first" }, 409);
         const added = (Array.isArray(b.photos) ? b.photos : []).filter((name: unknown) => readPhoto(name)) as string[];
         const text = String(b.text ?? "").trim();
-        if (!text && !photo && !added.length) return json(res, { error: "Feedback needs text" }, 400);
-        if (photo && Array.isArray(b.photo.dims)) {
-          photo = { ...photo, dims: cleanDims(b.photo.dims) };
-          writeFileSync(photoJson(photoName!), JSON.stringify(photo, null, 2) + "\n");
+        // The person's changed dims, by image: saved before the turn so the agent reads them.
+        const edited: string[] = [];
+        for (const [name, dims] of Object.entries(b.dims ?? {})) {
+          const p = readPhoto(name);
+          if (!p || !Array.isArray(dims)) continue;
+          writeFileSync(photoJson(name), JSON.stringify({ ...p, dims: cleanDims(dims) }, null, 2) + "\n");
+          edited.push(name);
         }
+        if (photoName) photo = readPhoto(photoName);
+        if (!text && !edited.length && !added.length) return json(res, { error: "Feedback needs text" }, 400);
         const refs: Ref[] = (Array.isArray(b.refs) ? b.refs : []).map((r: any) => ({
           n: Number(r.n), part: String(r.part), face: String(r.face),
           ...(Array.isArray(r.point) && { point: r.point.map(Number) }),
@@ -629,12 +646,12 @@ export async function serve(o: {
         // Described now: the model may be a different file by the time the turn starts.
         const feedback: Feedback = { text, refs: entry ? refs.map(describeRef) : [] };
         if (entry) feedback.entry = entry;
-        if (photo || added.length) {
+        if (photo || added.length || edited.length) {
           // Every image of the file goes along: they show one object from different sides.
           const file = photo ? photo.entry : entry;
-          const photos = listPhotos().filter((x) => x.name === photoName || added.includes(x.name) || (file && x.entry === file))
-            .map(({ name }) => ({ name, p: name === photoName ? photo! : readPhoto(name)! })).filter((x) => x.p);
-          feedback.photo = photoPrompt(file, photos, photoName, added);
+          const photos = listPhotos().filter((x) => x.name === photoName || added.includes(x.name) || edited.includes(x.name) || (file && x.entry === file))
+            .map(({ name }) => ({ name, p: readPhoto(name)! })).filter((x) => x.p);
+          feedback.photo = photoPrompt(file, photos, photoName, added, edited);
         }
         const pose = Object.entries(b.pose ?? {}).filter(([, v]) => Number.isFinite(v)).map(([j, v]) => `${j}=${v}`);
         if (pose.length) feedback.pose = pose.join(",");
@@ -645,7 +662,8 @@ export async function serve(o: {
         }
         queue.push(feedback);
         const said = text
-          || (added.length ? `Model from ${added.length === 1 ? added[0] : `${added.length} images`}` : `Dimensions on ${photoName}`);
+          || (added.length ? `Model from ${added.length === 1 ? added[0] : `${added.length} images`}`
+            : `Dimensions on ${edited.length === 1 ? edited[0] : `${edited.length} images`}`);
         say({ role: "user", kind: "text", text: said, refs: refs.length });
         status();
         void flush();
