@@ -41,6 +41,7 @@
 - a thread is built from flat triangles like a knurl, because the kernel silently fails to cut a swept helix where it crosses a coaxial cylinder; renders draw every triangle edge, so a thread looks dark
 - a `cut` that removes no volume fails with `CUT_NO_EFFECT`
 - import: `importStep(file)` loads a STEP file as a solid, with its path relative to the calling source file
+- a STEP file is an assembly: a body that stays several solids from one import becomes a body per solid, named after the lowest STEP instance that holds it, with the file's `__:1` suffix dropped and repeats numbered `-1`, `-2`; the part's only `body` takes the names as they are, another body prefixes its own, `motor.HORN`; each lists the body's features
 - an imported file has no feature names, so its faces are `<feature>.face[i]` in file order; replacing the file can renumber them, so prefer selecting the whole feature, `edges.of("motor").curve("circle")`
 - STEP files are tracked in git, because `diff` builds revisions from git; saving one in the project rebuilds
 - a STEP file is also an entry: every command and the app open it directly as one part named after the file, with no ports and no TypeScript source
@@ -71,7 +72,7 @@
 - `outerTangent(c1, r1, c2, r2, side)` gives the touch points of a line tangent to two circles
 - features: `union cut intersect fillet chamfer shell translate rotate mirror`
 - structure: `part assembly port mate revolute slider named place`; `part` and `assembly` define factories, and each call makes one instance
-- a part's build returns a solid, `{ solid }`, or `{ bodies: { name: solid } }`; one solid is the body `body`; giving both or no bodies is an error, and a body that is not exactly one solid is `NOT_ONE_SOLID`
+- a part's build returns a solid, `{ solid }`, or `{ bodies: { name: solid } }`; one solid is the body `body`; giving both or no bodies is an error, and a body that is not exactly one solid, and not split by its STEP instances, is `NOT_ONE_SOLID`
 - a part's faces keep their feature names across bodies, so face ids do not name the body; `model.json` lists each part's `bodies` as `{ name, steps }`, the ids of the steps first reached from that body in build order, the body last
 - links: mates and joints join parts into one tree, growing from the ground, or else the first part; a closed loop is `OVER_CONSTRAINED`
 - ground: an assembly's `ground: mate(world, port)` fixes that part facing the world frame (origin, +z up, x along +X), with `gap` and `angle` as in a mate; only the entry's ground counts, and `world` anywhere else is `BAD_MATE`
@@ -307,3 +308,4 @@
 - 2026-11-22: animate joints with named motions, played from the viewer
 - 2026-11-23: play an assembly's sequence, derived from its links, from the viewer
 - 2026-11-24: a part is made of named bodies; the model tree moves into the view, lists every feature with an icon of its kind, and plays a part's features in order
+- 2026-11-24: a STEP import of several solids gives a body per STEP instance

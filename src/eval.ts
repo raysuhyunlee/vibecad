@@ -1,9 +1,9 @@
 // Evaluates the feature graph on OCCT and tracks every face back to its source.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { BooleanOp, JoinType, OcctKernel, SweepMode, TransitionMode, type EvolutionData, type ShapeHandle } from "occt-wasm";
+import { BooleanOp, JoinType, OcctKernel, SweepMode, TransitionMode, type EvolutionData, type LabelTag, type ShapeHandle } from "occt-wasm";
 import {
-  EdgeSel, Instance, isWorld, originOf, Solid, world,
+  BODY, EdgeSel, Instance, isWorld, originOf, Solid, world,
   EASES, type CheckDef, type Ease, type FaceRef, type Helix, type JointDef, type KnurlPattern, type MateDef, type MotionDef, type Plane, type PortDef, type PortRef, type Profile, type Query, type Spine, type Src, type Vec3,
 } from "./lang.ts";
 
@@ -174,10 +174,11 @@ export interface BuildOutput {
   stepMeshes: Map<string, Map<number, MeshData>>;
 }
 
-/** A face's name, and the feature that made it, whose source line it points at. */
+/** A face's name, the feature that made it, whose source line it points at, and the STEP instance it was imported from. */
 interface Tag {
   name: string;
   node: Solid;
+  body?: string;
 }
 interface Evaluated {
   shape: ShapeHandle;
@@ -187,13 +188,13 @@ interface Evaluated {
 /** A feature's result kept between runs: its solid as BRep, and each face's name and the key of the feature that made it, in face order. */
 export interface KeptFeature {
   brep: Uint8Array;
-  faces: Array<{ name: string; from: string }>;
+  faces: Array<{ name: string; from: string; body?: string }>;
 }
 /**
  * Kept features from another version are rebuilt. Bump this when a change to evaluation can change
  * any feature's solid or face names; the pinned kernel version counts on its own.
  */
-export const FEATURES_VERSION = `3/occt-wasm@${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies["occt-wasm"]}`;
+export const FEATURES_VERSION = `4/occt-wasm@${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies["occt-wasm"]}`;
 /** One part's feature results by key, so a changed part rebuilds only the features after the change. `put` gets every feature the build used, kept or new. */
 export interface FeatureStore {
   get(key: string): KeptFeature | undefined;
@@ -270,7 +271,7 @@ class Evaluator {
   save(key: string, r: Evaluated) {
     const faces = this.faces(r.shape).map((f) => {
       const t = r.tags.get(this.hash(f));
-      return t ? { name: t.name, from: this.keyOf(t.node) } : undefined;
+      return t ? { name: t.name, from: this.keyOf(t.node), ...(t.body && { body: t.body }) } : undefined;
     });
     if (faces.every((f) => f !== undefined)) this.store!.put(key, { brep: this.k.toBREPBinary(r.shape), faces });
   }
@@ -291,7 +292,10 @@ class Evaluator {
         s.inputs.forEach(walk);
       };
       walk(n);
-      const tags = new Map(fs.map((f, i): [number, Tag] => [this.hash(f), { name: kept.faces[i]!.name, node: nodes.get(kept.faces[i]!.from) ?? n }]));
+      const tags = new Map(fs.map((f, i): [number, Tag] => {
+        const { name, from, body } = kept.faces[i]!;
+        return [this.hash(f), { name, node: nodes.get(from) ?? n, ...(body && { body }) }];
+      }));
       return { shape, tags, feature: kept };
     } catch {
       return undefined; // a damaged file is rebuilt
@@ -692,12 +696,18 @@ class Evaluator {
         if (!existsSync(a.path)) {
           throw new CadError("STEP_NOT_FOUND", `No STEP file at ${a.path}`, n.src, "The path is relative to the source file that calls importStep.");
         }
-        const shape = k.importStep(readFileSync(a.path, "utf8"));
+        const data = readFileSync(a.path, "utf8");
+        const shape = k.importStep(data);
         const faces = this.faces(shape);
         if (faces.length === 0) {
           throw new CadError("EMPTY_RESULT", `${a.path} has no faces`, n.src, hintFor(n));
         }
         const tags = new Map(faces.map((f, i): [number, Tag] => [this.hash(f), { name: `${n.name}.face[${i}]`, node: n }]));
+        const names = stepSolidNames(k, data);
+        const solids = k.getSubShapes(shape, "solid");
+        if (names.length === solids.length && names.length > 1) {
+          solids.forEach((s, i) => { for (const f of this.faces(s)) { const t = tags.get(this.hash(f)); if (t) t.body = names[i]; } });
+        }
         return { shape, tags };
       }
       case "cut":
@@ -1059,6 +1069,43 @@ class Evaluator {
 /** "mount" matches "mount[2].side"; "mount[2]" and "mount[2].side" match themselves. */
 function matches(faceName: string, sel: string) {
   return faceName === sel || faceName.startsWith(sel + ".") || faceName.startsWith(sel + "[");
+}
+
+/**
+ * The name of each solid in a STEP file, in the order the plain import gives them: the instance
+ * that holds it, with the file's suffixes dropped and repeats numbered. Empty when they do not line up.
+ */
+function stepSolidNames(k: OcctKernel, data: string): string[] {
+  const doc = k.importXCAFFromSTEP(data);
+  try {
+    const out: string[] = [];
+    const visit = (label: LabelTag, name: string) => {
+      const ref = doc.getReferredLabel(label) ?? label;
+      // A component is named after its instance, else the shape it places, else its parent; skip names OCCT makes up.
+      const own = [label, ref].map((l) => doc.getLabelInfo(l).name).find((n) => n && !/^(=>|(SOLID|SHELL|COMPOUND|ASSEMBLY)$)/.test(n));
+      name = own ?? name;
+      const children = doc.getChildren(ref);
+      if (children.length) return children.forEach((c) => visit(c, name));
+      const shape = doc.getLabelInfo(ref).shapeHandle;
+      const count = shape ? k.getSubShapes(shape, "solid").length : 0;
+      const base = name.replace(/_*:\d+$/, "").replace(/_+$/, "") || "solid";
+      for (let i = 0; i < count; i++) out.push(base);
+    };
+    for (const r of doc.getRoots()) visit(r, "");
+    const total = new Map<string, number>();
+    for (const n of out) total.set(n, (total.get(n) ?? 0) + 1);
+    const seen = new Map<string, number>();
+    return out.map((n) => {
+      if (total.get(n) === 1) return n;
+      const i = (seen.get(n) ?? 0) + 1;
+      seen.set(n, i);
+      return `${n}-${i}`;
+    });
+  } catch {
+    return [];
+  } finally {
+    doc.close();
+  }
 }
 
 function hintFor(n: Solid) {
@@ -1450,18 +1497,22 @@ export interface PartStore {
 
 function evalPart(ev: Evaluator, inst: Instance, withSteps: boolean): PartBuild {
   const k = ev.k;
-  const named = Object.entries(inst.bodies!);
-  const evaluated = named.map(([name, solid]) => {
+  const given = Object.entries(inst.bodies!);
+  // A body imported as several STEP solids becomes a body per solid, named after its STEP instance.
+  const split: Array<{ name: string; solid: Solid; pieces: string[] }> = given.map(([name, solid]) => {
     const e = ev.eval(solid);
     const pieces = k.getSubShapes(e.shape, "solid");
-    if (pieces.length !== 1) {
-      // Name each piece by the features its faces come from, so the loose one is easy to find.
-      const named = pieces.map((p) => `[${[...new Set(ev.faces(p).map((f) => e.tags.get(ev.hash(f))?.node.name))].join(", ")}]`);
-      throw new CadError("NOT_ONE_SOLID", `Body "${name}" of ${inst.typeName} is ${pieces.length} solids, not one: ${named.join(" ")}`, solid.src,
-        "Join the pieces, or give each its own body: part(..., () => ({ bodies: { a, b } }))");
+    if (pieces.length === 1) return { name, solid, pieces: [name] };
+    const of = pieces.map((p) => [...new Set(ev.faces(p).map((f) => e.tags.get(ev.hash(f))?.body).filter((b) => b !== undefined))]);
+    if (of.every((b) => b.length === 1) && new Set(of.map((b) => b[0])).size === pieces.length) {
+      return { name, solid, pieces: of.map((b) => (given.length === 1 && name === BODY ? b[0]! : `${name}.${b[0]}`)) };
     }
-    return e;
+    // Name each piece by the features its faces come from, so the loose one is easy to find.
+    const named = pieces.map((p) => `[${[...new Set(ev.faces(p).map((f) => e.tags.get(ev.hash(f))?.node.name))].join(", ")}]`);
+    throw new CadError("NOT_ONE_SOLID", `Body "${name}" of ${inst.typeName} is ${pieces.length} solids, not one: ${named.join(" ")}`, solid.src,
+      "Join the pieces, or give each its own body: part(..., () => ({ bodies: { a, b } }))");
   });
+  const evaluated = split.map((b) => ev.eval(b.solid));
   const shape = evaluated.length === 1 ? evaluated[0]!.shape : k.makeCompound(evaluated.map((e) => e.shape));
   const tags = new Map(evaluated.flatMap((e) => [...e.tags]));
   const seen = new Map<string, number>();
@@ -1505,10 +1556,11 @@ function evalPart(ev: Evaluator, inst: Instance, withSteps: boolean): PartBuild 
     own.push(n.id);
     if (withSteps) stepMeshes.set(n.id, toMesh(k, r.shape, "", () => -1));
   };
-  const bodies: BodyInfo[] = named.map(([name, solid]) => {
+  const bodies: BodyInfo[] = split.flatMap(({ solid, pieces }) => {
     own = [];
     walk(solid);
-    return { name, steps: own };
+    const steps = own;
+    return pieces.map((name) => ({ name, steps }));
   });
 
   return {

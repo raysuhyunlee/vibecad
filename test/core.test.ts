@@ -816,6 +816,22 @@ test("an imported STEP solid keeps its geometry, takes features, and points at s
   assert.equal(after.bbox.min[2], 5);
 });
 
+test("a STEP file of several solids gives a body per solid, named after its instance", async () => {
+  const k = await getKernel();
+  const doc = k.createXCAFDocument();
+  const solids = [(await build(plate())).shapes, (await build(part("Pin", () => box(2, 2, 2).translate(40, 0, 0))())).shapes];
+  const asm = doc.addShape(k.makeCompound(solids.map((m) => [...m.values()][0]!)), { assembly: true, name: "kit" });
+  doc.getChildren(asm).forEach((c, i) => doc.setName(c, ["PLATE__:1", "PIN__:1"][i]!));
+  mkdirSync(".vibecad/out", { recursive: true });
+  writeFileSync(".vibecad/out/kit.step", doc.exportSTEP());
+  doc.close();
+  const kit = () => importStep("../.vibecad/out/kit.step").named("kit");
+  const p = (await build(part("Kit", kit)())).model.parts[0]!;
+  assert.deepEqual(p.bodies.map((b) => b.name), ["PLATE", "PIN"]);
+  const two = (await build(part("Two", () => ({ bodies: { kit: kit(), post: box(1, 1, 1).translate(0, 40, 0) } }))())).model.parts[0]!;
+  assert.deepEqual(two.bodies.map((b) => b.name), ["kit.PLATE", "kit.PIN", "post"]);
+});
+
 test("a bad STEP file reports its code and source line", async () => {
   await assert.rejects(build(part("Missing", () => importStep("nope.step"))()), (e: CadError) => {
     assert.equal(e.code, "STEP_NOT_FOUND");
