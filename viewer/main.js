@@ -740,7 +740,15 @@ canvas.addEventListener("pointerup", (e) => {
     }
     return;
   }
-  if (moved <= CLICK_SLOP) toggleMeasure(pickAny(e));
+  if (moved > CLICK_SLOP) return;
+  const hit = pickAny(e);
+  toggleMeasure(hit);
+  // Empty space also clears the tree selection.
+  if (!hit && (selectedPart !== null || previewStep !== null)) {
+    selectedPart = null;
+    setPreview(null);
+    renderDesign();
+  }
 });
 function extendStroke(e) {
   const at = worldAt(e);

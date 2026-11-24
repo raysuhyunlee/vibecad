@@ -232,7 +232,7 @@
 
 ## measuring
 
-- outside draw mode, a click picks a face, or an edge within a few pixels of the pointer; picking it again drops it, and empty space clears all
+- outside draw mode, a click picks a face, or an edge within a few pixels of the pointer; picking it again drops it, and empty space clears all, including a part or feature selected in the tree
 - the picks' dimensions show in the view's lower right corner, at the current pose
 - one face: area, and diameter for a cylinder or sphere; one edge: diameter for a circle, radius and length for an arc, else length
 - two circles: center distance, and the least and greatest distance between them
