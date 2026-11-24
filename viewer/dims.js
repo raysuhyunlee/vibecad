@@ -2,15 +2,17 @@
 //
 // A dim: { kind: "length" | "diameter" | "radius" | "angle", a, b, c?, w, h } where w and h are its label's size.
 //   length and diameter span a to b; radius runs from the center a to b on the circle; angle opens at c from ray c-a to ray c-b.
-// Its layout: { label: { c, t, up, w, h, deg }, lines, ext, arrows, arc? }
+// Its layout: { label: { c, t, up, w, h, deg }, lines, ext, arrows, arc?, outline? }
 //   the label is centered at c and reads along t; lines are the dim line, ext the extension lines,
 //   arrows are { at, dir } with dir pointing into the tip, and arc is { c, r, from, to } in radians.
+//   outline is the circle a diameter spans, or the arc of the circle a radius ends on, as { c, r, from, to }.
 
 const GAP = 4; // label to its dim line
 export const ARROW = 9;
 const STEP = 26; // each try moves a dim line this much further off its points
 const EXT = 5; // extension lines run past the dim line
 const HANDLE = 9;
+const CLEAR = 20; // dims closer than this to each other read as one, so one moves off
 const TURNS = [0, 30, -30, 60, -60, 90].map((d) => (d * Math.PI) / 180); // tries for a diameter or radius line
 
 const add = (p, q) => [p[0] + q[0], p[1] + q[1]];
@@ -72,18 +74,27 @@ function arcPoints(arc, n = 12) {
 }
 function segmentsOf(g) {
   const out = [...g.lines, ...g.ext];
-  if (g.arc) {
-    const pts = arcPoints(g.arc);
+  for (const arc of [g.arc, g.outline]) if (arc) {
+    const pts = arcPoints(arc, 24);
     for (let i = 1; i < pts.length; i++) out.push([pts[i - 1], pts[i]]);
   }
   return out;
+}
+
+/** Whether dim lines s and r run side by side, parallel, closer than CLEAR, along more than a few pixels. */
+function crowds(s, r) {
+  const t = unit(sub(s[1], s[0]));
+  if (Math.abs(t[0] * (r[1][1] - r[0][1]) - t[1] * (r[1][0] - r[0][0])) > 0.1 * len(sub(r[1], r[0]))) return false;
+  if (Math.abs(dot(sub(r[0], s[0]), [-t[1], t[0]])) >= CLEAR) return false;
+  const a = [dot(s[0], t), dot(s[1], t)].sort((x, y) => x - y), b = [dot(r[0], t), dot(r[1], t)].sort((x, y) => x - y);
+  return Math.min(a[1], b[1]) - Math.max(a[0], b[0]) > 4;
 }
 
 /**
  * A length dim line between p and q, `off` across, with its label `side` up or down,
  * between the arrows or beyond either end. A radius has one arrow, at q.
  */
-function linear(p, q, off, side, place, w, h, radius) {
+function linear(p, q, off, side, place, w, h, radius, frac = 0.5) {
   const f = textFrame(unit(sub(q, p)));
   const shift = mul(f.up, off);
   const P = add(p, shift), Q = add(q, shift);
@@ -92,7 +103,7 @@ function linear(p, q, off, side, place, w, h, radius) {
   const lift = mul(f.up, side * (h / 2 + GAP));
   const out = mul(f.t, ARROW + 4 + w);
   let c, line = [P, Q];
-  if (place === "in") c = add(mul(add(P, Q), 0.5), lift);
+  if (place === "in") c = add(add(P, mul(sub(Q, P), frac)), lift);
   else if (place === "hi") {
     c = add(add(hi, mul(f.t, ARROW + 4 + w / 2)), lift);
     line = [lo, add(hi, out)];
@@ -103,7 +114,7 @@ function linear(p, q, off, side, place, w, h, radius) {
   const dir = unit(sub(Q, P));
   const arrows = radius ? [{ at: Q, dir }] : [{ at: P, dir: mul(dir, -1) }, { at: Q, dir }];
   const ext = off === 0 ? [] : [[p, add(P, mul(unit(shift), EXT))], [q, add(Q, mul(unit(shift), EXT))]];
-  return { label: label(c, f, w, h), lines: [line], ext, arrows, fits: span >= w + 2 * ARROW + 6 };
+  return { label: label(c, f, w, h), lines: [line], ext, arrows, fits: span * Math.min(frac, 1 - frac) >= w / 2 + ARROW + 3 };
 }
 
 /** An angle's arc at radius r, with its label outside the arc: at its middle, or beyond either end. */
@@ -137,11 +148,17 @@ function* options(d) {
     return;
   }
   if (d.kind === "diameter" || d.kind === "radius") {
-    const pivot = d.kind === "radius" ? d.a : mul(add(d.a, d.b), 0.5);
+    const radius = d.kind === "radius";
+    const pivot = radius ? d.a : mul(add(d.a, d.b), 0.5);
+    const r = len(sub(d.b, pivot)), at = Math.atan2(d.b[1] - pivot[1], d.b[0] - pivot[0]);
+    const SPAN = (25 * Math.PI) / 180; // a radius's arc runs this far past its point and its arrow
     for (const [i, a] of TURNS.entries()) {
       const p = add(pivot, turn(sub(d.a, pivot), a)), q = add(pivot, turn(sub(d.b, pivot), a));
-      for (const side of [1, -1]) for (const [place, pp] of places) {
-        yield { place, g: linear(p, q, 0, side, place, w, h, d.kind === "radius"), pref: i * 0.5 + pp + (side < 0 ? 0.1 : 0) };
+      const outline = radius ? { c: pivot, r, from: Math.min(at, at + a) - SPAN, to: Math.max(at, at + a) + SPAN } : { c: pivot, r, from: 0, to: 2 * Math.PI };
+      // a diameter's label may sit off its center, so concentric diameters can turn apart
+      const at = radius ? [["in", 0, 0.5]] : [["in", 0, 0.5], ["in", 0.3, 0.75], ["in", 0.3, 0.25]];
+      for (const side of [1, -1]) for (const [place, pp, frac] of [...at, ...places.slice(1)]) {
+        yield { place, g: { ...linear(p, q, 0, side, place, w, h, radius, frac), outline }, pref: i * 0.5 + pp + (side < 0 ? 0.1 : 0) };
       }
     }
     return;
@@ -159,7 +176,7 @@ export function layoutDims(dims, W, H) {
   const view = { c: [W / 2, H / 2], t: [1, 0], up: [0, -1], w: W, h: H };
   const handles = dims.flatMap((d) => [d.a, d.b, ...(d.c ? [d.c] : [])]);
   const features = dims.map((d) => (d.kind === "angle" ? [[d.c, d.a], [d.c, d.b]] : [[d.a, d.b]]));
-  const labels = [], drawn = [];
+  const labels = [], drawn = [], dimLines = [], tips = [];
   return dims.map((d, i) => {
     let best = null;
     for (const o of options(d)) {
@@ -169,6 +186,9 @@ export function layoutDims(dims, W, H) {
       let cost = o.pref;
       if (!corners(g.label).every((p) => holds(view, p))) cost += 20;
       cost += labels.filter((l) => overlap(box, l)).length * 12;
+      cost += labels.filter((l) => overlap(grow(g.label, CLEAR), l)).length * 3;
+      cost += g.lines.reduce((n, s) => n + dimLines.filter((r) => crowds(s, r)).length, 0) * 5;
+      cost += g.arrows.reduce((n, a) => n + tips.filter((t) => { const e = len(sub(a.at, t)); return e > 2 && e < CLEAR; }).length, 0) * 3;
       cost += handles.filter((p) => holds(grow(g.label, HANDLE), p)).length * 3;
       cost += features.filter((s, j) => j !== i).flat().filter((s) => crosses(box, s)).length * 2;
       cost += drawn.filter((s) => crosses(box, s)).length * 2;
@@ -177,6 +197,8 @@ export function layoutDims(dims, W, H) {
     }
     labels.push(best.g.label);
     drawn.push(...segmentsOf(best.g));
+    dimLines.push(...best.g.lines);
+    tips.push(...best.g.arrows.map((a) => a.at));
     return best.g;
   });
 }

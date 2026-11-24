@@ -59,9 +59,10 @@ interface Dim {
   id: string;
   label: string;
   kind?: (typeof DIM_KINDS)[number]; // length when absent
-  a: number[];
-  b: number[];
-  c?: number[]; // an angle's vertex
+  a?: number[]; // a diameter has none
+  b?: number[];
+  c?: number[]; // an angle's vertex, or a diameter's center
+  r?: number; // a diameter's radius in pixels
   value: number | null; // null: the agent asks for it
 }
 interface Photo {
@@ -87,21 +88,29 @@ const readPhoto = (name: unknown): Photo | undefined => {
   if (typeof name !== "string" || !PHOTO_NAME.test(name)) return undefined;
   try {
     const p = JSON.parse(readFileSync(photoJson(name), "utf8"));
-    return { ...p, dims: Array.isArray(p.dims) ? p.dims : [] };
+    return { ...p, dims: Array.isArray(p.dims) ? p.dims.map(circled) : [] };
   } catch {
     return undefined;
   }
 };
+/** A diameter as its center and radius, from the two points across it an older file has. */
+function circled(d: Dim): Dim {
+  if (d?.kind !== "diameter" || d.c || !d.a || !d.b) return d;
+  const { a: [ax = 0, ay = 0], b: [bx = 0, by = 0], ...rest } = d;
+  return { ...rest, c: [(ax + bx) / 2, (ay + by) / 2], r: Math.hypot(bx - ax, by - ay) / 2 };
+}
 const point = (v: unknown) => (Array.isArray(v) && v.length === 2 && v.every(Number.isFinite) ? v.map(Number) : undefined);
 /** The person's dims as sent by the viewer, keeping only well-formed ones. */
 function cleanDims(list: unknown): Dim[] {
   const out: Dim[] = [];
   for (const d of Array.isArray(list) ? list : []) {
-    const a = point(d?.a), b = point(d?.b), c = point(d?.c);
+    const a = point(d?.a), b = point(d?.b), c = point(d?.c), r = Number(d?.r);
     const kind = DIM_KINDS.find((k) => k === d?.kind) ?? "length";
-    if (!a || !b || typeof d.id !== "string" || (kind === "angle" && !c)) continue;
+    if (typeof d.id !== "string") continue;
+    if (kind === "diameter" ? !c || !(r > 0) : !a || !b || (kind === "angle" && !c)) continue;
     const value = Number.isFinite(d.value) && d.value >= 0 ? Number(d.value) : null;
-    out.push({ id: d.id.slice(0, 40), label: String(d.label ?? "").slice(0, 80), kind, a, b, ...(kind === "angle" && { c }), value });
+    const at = kind === "diameter" ? { c, r } : { a, b, ...(kind === "angle" && { c }) };
+    out.push({ id: d.id.slice(0, 40), label: String(d.label ?? "").slice(0, 80), kind, ...at, value });
   }
   return out;
 }
@@ -111,7 +120,8 @@ function photoPrompt(file: string | undefined, photos: { name: string; p: Photo 
   const list = photos.map(({ name, p }) => {
     const tags = [added.includes(name) && "new", edited.includes(name) && "dims changed", name === open && "open on screen"].filter(Boolean);
     const dims = p.dims.map((d) => {
-      const at = d.kind === "angle" && d.c ? `c=${n(d.c)} a=${n(d.a)} b=${n(d.b)}` : `${n(d.a)}-${n(d.b)}`;
+      const at = d.kind === "diameter" ? `c=${n(d.c!)} r=${Math.round(d.r!)}`
+        : d.kind === "angle" ? `c=${n(d.c!)} a=${n(d.a!)} b=${n(d.b!)}` : `${n(d.a!)}-${n(d.b!)}`;
       const value = d.value === null ? "asked" : `= ${d.value} ${d.kind === "angle" ? "deg" : "mm"}`;
       return `    ${d.id} ${d.kind ?? "length"} "${d.label}" ${at} ${value}`;
     });
@@ -121,7 +131,7 @@ function photoPrompt(file: string | undefined, photos: { name: string; p: Photo 
     `Reference images: photos of one real object from different sides, or hand sketches of it.`,
     ...list,
     `- Look at every image${added.length ? ", the new ones closely" : ""}. Model the object in ${file ?? "a new .cad.ts file, and set \"entry\" in each json to its project path"}, every dimension a named param; mark params you guessed \`// estimated\`.`,
-    `- Ask for the dimensions you still need by adding dims { id, label, kind, a, b, value: null } to the image that shows them best. kind is "length" (a to b), "diameter" (a and b across the circle, through its center), "radius" (a the center, b on the circle) or "angle" (c the vertex, a and b on each ray). Points are in image pixels from the top left, on the edges the dimension spans; label is a few words. Ask each dimension once, on one image. Ask the few that most change the shape first; ask more in later turns.`,
+    `- Ask for the dimensions you still need by adding dims { id, label, kind, a, b, value: null } to the image that shows them best. kind is "length" (a to b), "diameter" ({ c, r } in place of a and b: the circle's center and radius in pixels), "radius" (a the center, b on the arc, where it shows) or "angle" (c the vertex, a and b on each ray). Points are in image pixels from the top left, exactly on the features the dimension spans, such as an edge or a hole's center, even when another dim is close: the view moves crowded dim lines off with extension lines; label is a few words. Ask each dimension once, on one image. Ask the few that most change the shape first; ask more in later turns.`,
     `- A dim with a number is the person's, in mm or degrees for an angle: measured on the object or meant on a sketch. It wins over the images. Never change or remove it. Remove your asked dims you no longer need.`,
   ].join("\n");
 }

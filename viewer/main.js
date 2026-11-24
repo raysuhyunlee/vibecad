@@ -1994,15 +1994,21 @@ function dimLabel(d) {
   el.append(value, unit, remove);
   return el;
 }
-/** The points to drag, in image pixels. */
-function renderHandles() {
+/**
+ * The points to drag, in image pixels. A diameter or radius has its center and a rim point,
+ * at its arrow as laid out: dragging the rim sizes a diameter and moves a radius's point on its arc.
+ */
+function renderHandles(rims) {
   const svg = $("photo-svg");
   const k = svg.getScreenCTM()?.a || 1;
   const out = [];
-  for (const d of photo.doc.dims) {
-    for (const end of ["a", "b", "c"]) {
-      if (!d[end]) continue;
-      const c = svgEl("circle", { cx: d[end][0], cy: d[end][1], r: 5 / k });
+  for (const [i, d] of photo.doc.dims.entries()) {
+    const ends = d.kind === "diameter" ? [["c", d.c], ["rim", rims[i]]]
+      : d.kind === "radius" ? [["a", d.a], ["rim", rims[i]]]
+      : ["a", "b", "c"].map((end) => [end, d[end]]);
+    for (const [end, at] of ends) {
+      if (!at) continue;
+      const c = svgEl("circle", { cx: at[0], cy: at[1], r: 5 / k });
       c.onpointerdown = (e) => {
         if (e.button !== 0) return;
         e.stopPropagation();
@@ -2030,7 +2036,6 @@ function renderPhoto() {
   svg.setAttribute("viewBox", `0 0 ${photo.doc.size[0]} ${photo.doc.size[1]}`);
   const m = svg.getScreenCTM();
   if (!m) return;
-  renderHandles();
   const layer = $("photo-labels");
   const box = layer.getBoundingClientRect();
   const toLayer = (p) => {
@@ -2041,8 +2046,15 @@ function renderPhoto() {
   const labels = dims.map(dimLabel);
   const decor = svgEl("svg", { id: "photo-decor" });
   layer.replaceChildren(decor, ...labels);
+  const fromLayer = (p) => {
+    const q = new DOMPoint(p[0] + box.left, p[1] + box.top).matrixTransform(m.inverse());
+    return [q.x, q.y];
+  };
   const laid = layoutDims(dims.map((d, i) => ({
-    kind: d.kind ?? "length", a: toLayer(d.a), b: toLayer(d.b), ...(d.c && { c: toLayer(d.c) }),
+    kind: d.kind ?? "length",
+    ...(d.kind === "diameter"
+      ? { a: toLayer([d.c[0] - d.r, d.c[1]]), b: toLayer([d.c[0] + d.r, d.c[1]]) }
+      : { a: toLayer(d.a), b: toLayer(d.b), ...(d.c && { c: toLayer(d.c) }) }),
     w: labels[i].offsetWidth, h: labels[i].offsetHeight,
   })), box.width, box.height);
   laid.forEach((g, i) => {
@@ -2054,9 +2066,14 @@ function renderPhoto() {
     for (const [p, q] of g.ext) group.append(svgEl("line", { x1: p[0], y1: p[1], x2: q[0], y2: q[1], class: "ext" }));
     for (const [p, q] of g.lines) group.append(svgEl("line", { x1: p[0], y1: p[1], x2: q[0], y2: q[1], class: "dim" }));
     if (g.arc) group.append(svgEl("path", { d: arcPath(g.arc), class: "dim" }));
+    const o = g.outline;
+    if (o) group.append(o.to - o.from >= 2 * Math.PI - 1e-6
+      ? svgEl("circle", { cx: o.c[0], cy: o.c[1], r: o.r, class: "ext outline" })
+      : svgEl("path", { d: arcPath(o), class: "ext outline" }));
     for (const a of g.arrows) group.append(svgEl("path", { d: arrowPath(a), class: "arrow" }));
     decor.append(group);
   });
+  renderHandles(laid.map((g, i) => (dims[i].kind === "diameter" || dims[i].kind === "radius" ? fromLayer(g.arrows.at(-1).at) : undefined)));
 }
 {
   const svg = $("photo-svg");
@@ -2072,7 +2089,10 @@ function renderPhoto() {
   });
   svg.addEventListener("pointermove", (e) => {
     if (!photo.drag) return;
-    photo.drag.d[photo.drag.end] = imagePoint(e);
+    const { d, end } = photo.drag, p = imagePoint(e);
+    if (end !== "rim") d[end] = p;
+    else if (d.kind === "diameter") d.r = Math.max(1, Math.hypot(p[0] - d.c[0], p[1] - d.c[1]));
+    else d.b = p;
     renderPhoto();
   });
   const finish = (e) => {

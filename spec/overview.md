@@ -210,23 +210,23 @@
 - it lives in the project as `refs/<name>.jpg` and `refs/<name>.json`, tracked in git like STEP files
 - the app shrinks an added image so the agent sees it at full size: at most 1568 px on a side and 1.15 megapixels, saved as JPEG
 - an image belongs to one modeling file, its `entry`, set when it is added; it is added to the file on screen, so a new part starts as a new file
-- `<name>.json` is `{ image, size: [w, h], entry, dims: [{ id, label, kind, a: [x, y], b: [x, y], c?, value }] }`, with points in image pixels from the top left
-- `kind` is `length` (a to b, the default), `diameter` (a and b across the circle through its center), `radius` (a the center, b on the circle) or `angle` (c the vertex, a and b on each ray); values are mm, or degrees for an angle
+- `<name>.json` is `{ image, size: [w, h], entry, dims: [{ id, label, kind, a: [x, y], b: [x, y], c?, r?, value }] }`, with points and r in image pixels from the top left
+- `kind` is `length` (a to b, the default), `diameter` (c the center and r the radius, no a or b; an older a and b across the circle read as its center and radius), `radius` (a the center, b on the arc, where it shows) or `angle` (c the vertex, a and b on each ray); values are mm, or degrees for an angle
 - a dim with `value: null` is the agent asking; a number is the person's, measured on the object or meant on a sketch, and wins over the image
 - an end point need not be exact: the label and the value carry the meaning
 - the person adds images, several at once, by the button or a drop on the view, the model or the images alike; adding starts no turn and shows the image browser: the images wait as thumbnails above the message box, to open or leave out, and go with the next message, which needs no text
-- with them the agent models a draft in `entry` with every dimension a named param, marks guessed ones `// estimated`, and asks for the dims it needs, each once, on the image that shows it best
+- with them the agent models a draft in `entry` with every dimension a named param, marks guessed ones `// estimated`, and asks for the dims it needs, each once, on the image that shows it best, with end points on the features themselves even when dims crowd
 - the agent asks in rounds, the most important first; it never changes or removes a value the person gave
 - a bar at the bottom of the view switches between the model and the image browser, `I` too; it shows once the file has an image; switching files goes back to the model
 - an image with asked dims the person has not filled shows their count, `N to measure` on its tile and a number on its strip thumbnail, counting unsent values as they are typed
 - the image browser shows the file's images in a grid, with a tile to add more; deleting one, after a confirm, removes its jpg and json
 - opening an image shows a strip of the file's images on top, the open one marked, and the image below; a grid button goes back to the grid; going to the model and back reopens it
 - the browser's button sends a message with no text: `Model from N new images` while there are added images, else `Update model`, enabled while some image's dims changed
-- photo mode: the image fills the space below the strip with its dims; the person types values, drags end points, drags on the image to add a dim, or removes one
+- photo mode: the image fills the space below the strip with its dims; the person types values, drags end points (a diameter's or radius's are its center and a point on its circle at its arrow, which sizes a diameter or moves a radius along), drags on the image to add a dim, or removes one
 - dims are drawn CAD style, with arrows at both ends; a radius has one, on the circle; a dim the agent asks for is dashed
 - a label holds the value, with `Ø` or `R` before a diameter or radius; its name shows on hover or while typing
-- a length's label reads along its line, above or below it; when it does not fit between the arrows it goes beyond one end, and the line runs on to it; when it covers another label, a line or an end point, the line moves off its points, with extension lines
-- a diameter or radius turns about its center instead, and its label follows the length rules
+- a length's label reads along its line, above or below it; when it does not fit between the arrows it goes beyond one end, and the line runs on to it; when it covers another label, a line or an end point, or runs close beside another dim's line, arrows or label, the line and its arrows move off its points, parallel, with an extension line square to it from each point
+- a diameter draws its circle, a radius the arc of its circle around its end; its line turns about the center instead of moving off, so concentric ones turn apart, and its label follows the length rules, a diameter's also sitting off its center
 - an angle is an arc between its rays, its label outside the arc; when the label does not fit, it goes beyond one end and the arc runs on to it; the arc grows to clear other labels, and rays reach it with extension lines
 - the person draws lengths; the agent may ask any kind
 - overlay mode: the image sits faded over the model and passes the pointer through, so the person orbits the model to match the image; the screenshot sent carries both
