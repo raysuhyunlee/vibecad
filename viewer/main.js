@@ -118,6 +118,7 @@ async function loadModel() {
   disposeTree(world);
   world.clear();
   parts = new Map();
+  playback = null; // its objects went with the world
   previewStep = null;
   previewObject = null;
   hoverOverlay = null;
@@ -798,6 +799,7 @@ function frame(now) {
     }
   }
   stepMotion(now);
+  stepPlayback(now);
   renderer.render(scene, camera);
   renderGizmo();
   const ctx = ink.getContext("2d");
@@ -1043,6 +1045,10 @@ function motionRow(m) {
   const b = row(m.path, `${jointNumber(m.duration)}s`, false, () => {
     const on = playing?.path !== m.path;
     stopMotion();
+    if (on && playback) {
+      setPreview(null);
+      renderDesign();
+    }
     if (on) playing = { path: m.path, start: performance.now() };
     b.setAttribute("aria-pressed", String(on));
   });
@@ -1070,14 +1076,24 @@ function row(label, dim, current, onclick) {
   b.onclick = onclick;
   return b;
 }
-const openPlaces = new Set(); // sub-assembly paths unfolded in the parts list; folded by default
+// Folds of the model tree by key: a place or part path, or "<part path>#<body>". A file of one
+// part opens on it and its only body; everything else starts folded.
+const folds = new Map();
 const leafName = (path) => path.slice(path.lastIndexOf("/") + 1);
-/** The parts list as the instance tree: each sub-assembly folds over the parts placed under it. */
+const isOpen = (key, byDefault = false) => folds.get(key) ?? byDefault;
+function toggleFold(key, byDefault) {
+  folds.set(key, !isOpen(key, byDefault));
+  renderDesign();
+}
+const indent = (b, depth) => (b.style.marginLeft = `${depth * 16}px`);
+const TWISTY = '<svg class="twisty" aria-hidden="true"><use href="#i-chevron"/></svg>';
+/** The model tree: places fold over their parts, a part over its bodies, a body over its features. */
 function partRows() {
   const types = new Map((model.assemblies ?? []).map((a) => [a.path, a.type]));
+  const solo = model.parts.length === 1;
   const out = [], shown = new Set();
   for (const p of model.parts) {
-    const segs = p.path.split("/");
+    const segs = p.path ? p.path.split("/") : [];
     let hidden = false;
     for (let i = 1; i < segs.length && !hidden; i++) {
       const path = segs.slice(0, i).join("/");
@@ -1085,37 +1101,94 @@ function partRows() {
         shown.add(path);
         out.push(placeRow(path, types.get(path) ?? "", i - 1));
       }
-      hidden = !openPlaces.has(path);
+      hidden = !isOpen(path);
     }
     if (hidden) continue;
-    const b = row(p.path ? leafName(p.path) : p.type, p.type, selectedPart === p.path, () => {
+    const depth = Math.max(segs.length - 1, 0);
+    const open = isOpen(p.path, solo);
+    const b = row(p.path ? leafName(p.path) : p.type, p.path ? p.type : "", selectedPart === p.path && previewStep === null, (e) => {
+      if (e.target.closest(".twisty")) return toggleFold(p.path, solo);
       selectedPart = selectedPart === p.path ? null : p.path;
       setPreview(null);
       renderDesign();
     });
-    b.title = p.path;
-    b.style.paddingLeft = `calc(var(--s2) + ${(segs.length - 1) * 16}px)`;
+    b.title = p.path || p.type;
+    b.setAttribute("aria-expanded", open);
+    kindIcon(b, "i-part", "Part");
+    b.insertAdjacentHTML("afterbegin", TWISTY);
     if (model.ground === p.path) {
-      b.firstChild.insertAdjacentHTML("afterend", '<svg class="ground" role="img" aria-label="Ground"><title>Ground</title><use href="#i-pin"/></svg>');
+      b.querySelector(".name").insertAdjacentHTML("afterend", '<svg class="ground" role="img" aria-label="Ground"><title>Ground</title><use href="#i-pin"/></svg>');
     }
     b.onpointerenter = () => setHoveredPart(p.path);
     b.onpointerleave = () => setHoveredPart(null);
-    out.push(b);
+    out.push(withPlay(b, p.path, "", p.steps.map((s) => s.id), p.type, depth));
+    if (open) out.push(...bodyRows(p, depth + 1));
   }
   return out;
 }
-function placeRow(path, type, depth) {
-  const open = openPlaces.has(path);
-  const b = row(leafName(path), type, false, () => {
-    if (open) openPlaces.delete(path);
-    else openPlaces.add(path);
+function bodyRows(p, depth) {
+  const byId = new Map(p.steps.map((s) => [s.id, s]));
+  const one = p.bodies.length === 1;
+  return p.bodies.flatMap((body) => {
+    const key = `${p.path}#${body.name}`;
+    const open = isOpen(key, one);
+    const b = row(body.name, "", false, () => toggleFold(key, one));
+    b.setAttribute("aria-expanded", open);
+    kindIcon(b, "i-body", "Body");
+    b.insertAdjacentHTML("afterbegin", TWISTY);
+    return [withPlay(b, p.path, body.name, body.steps, body.name, depth), ...(open ? body.steps.map((id) => featureRow(p.path, byId.get(id), depth + 1)) : [])];
+  });
+}
+/** An icon before a row's name that says what kind of thing it is. */
+function kindIcon(b, id, label) {
+  b.querySelector(".name").insertAdjacentHTML("beforebegin", `<svg class="kind" role="img" aria-label="${label}"><title>${label}</title><use href="#${id}"/></svg>`);
+}
+const OP_ICONS = new Set(["box", "cylinder", "cone", "sphere", "knurl", "thread", "extrude", "revolve", "sweep", "loft", "union", "cut", "intersect", "fillet", "chamfer", "shell", "translate", "rotate", "mirror", "importStep"]);
+/** A row with a button that plays its features in build order. */
+function withPlay(b, path, key, ids, label, depth) {
+  const el = document.createElement("div");
+  el.className = "item";
+  indent(el, depth);
+  const play = document.createElement("button");
+  play.type = "button";
+  play.className = "icon";
+  const on = playback?.path === path && playback.key === key;
+  play.setAttribute("aria-pressed", String(on));
+  play.setAttribute("aria-label", on ? "Stop" : `Play ${label}`);
+  play.title = on ? "Stop" : `Play ${label} feature by feature`;
+  play.innerHTML = '<svg class="off"><use href="#i-play"/></svg><svg class="on"><use href="#i-stop"/></svg>';
+  play.onclick = () => {
+    if (on) stopPlayback();
+    else startPlayback(path, key, ids);
+    renderDesign();
+  };
+  el.append(b, play);
+  return el;
+}
+/** A feature: clicking shows the part as it was after it, with its source. */
+function featureRow(path, s, depth) {
+  const current = previewStep === s.id && selectedPart === path;
+  const b = row(s.name, "", current, () => {
+    stopPlayback();
+    selectedPart = path;
+    setPreview(current ? null : s.id);
+    showSource(s.src);
     renderDesign();
   });
+  b.title = s.op;
+  kindIcon(b, OP_ICONS.has(s.op) ? `i-op-${s.op}` : "i-op-feature", s.op);
+  indent(b, depth);
+  return b;
+}
+function placeRow(path, type, depth) {
+  const open = isOpen(path);
+  const b = row(leafName(path), type, false, () => toggleFold(path));
   b.classList.add("place");
   b.title = path;
-  b.style.paddingLeft = `calc(var(--s2) + ${depth * 16}px)`;
+  indent(b, depth);
   b.setAttribute("aria-expanded", open);
-  b.insertAdjacentHTML("afterbegin", '<svg aria-hidden="true"><use href="#i-chevron"/></svg>');
+  kindIcon(b, "i-assembly", "Assembly");
+  b.insertAdjacentHTML("afterbegin", TWISTY);
   b.onpointerenter = () => setHoveredPart(path);
   b.onpointerleave = () => setHoveredPart(null);
   return b;
@@ -1123,27 +1196,15 @@ function placeRow(path, type, depth) {
 function renderDesign() {
   $("parts").hidden = !model;
   if (!model) {
-    $("joints").hidden = $("steps").hidden = $("checks").hidden = true;
+    $("joints").hidden = $("checks").hidden = true;
     return;
   }
-  if (selectedPart && !parts.has(selectedPart)) selectedPart = null;
+  if (selectedPart !== null && !parts.has(selectedPart)) selectedPart = null;
   $("parts").replaceChildren(...partRows());
   const assembles = (model.sequence?.length ?? 0) > 1;
   $("joints").hidden = model.joints.length === 0 && !assembles;
   jointShows = [];
   $("joints").replaceChildren(...(assembles ? [assemblyRow()] : []), ...(model.motions ?? []).map(motionRow), ...model.joints.map(jointRow));
-  const part = selectedPart !== null ? parts.get(selectedPart) : null;
-  const steps = $("steps");
-  steps.hidden = !part;
-  if (part) {
-    steps.replaceChildren(...spine(part.info.steps).map((s) =>
-      row(stepLabel(s, part.info.steps), s.op, previewStep === s.id, () => {
-        setPreview(previewStep === s.id ? null : s.id);
-        showSource(s.src);
-        renderDesign();
-      }),
-    ));
-  }
   const checks = $("checks");
   checks.hidden = model.checks.length === 0;
   checks.replaceChildren(...model.checks.map((c) => {
@@ -1153,28 +1214,10 @@ function renderDesign() {
     return el;
   }));
 }
-/** The body's own history: from the result back along each feature's first input. */
-function spine(steps) {
-  const byId = new Map(steps.map((s) => [s.id, s]));
-  const out = [];
-  for (let s = steps.at(-1); s; s = byId.get(s.inputs[0])) {
-    if (!isTransform(s) || isNamed(s)) out.unshift(s);
-  }
-  return out;
-}
-const isTransform = (s) => ["translate", "rotate", "mirror"].includes(s.op);
-const isNamed = (s) => !/^[a-z]+\d+$/.test(s.name) || !s.name.startsWith(s.op);
-/** "cut pocket, mount[0], ..." reads better than "cut1". */
-function stepLabel(s, steps) {
-  if (isNamed(s) && !["union", "cut", "intersect"].includes(s.op)) return s.name;
-  const byId = new Map(steps.map((x) => [x.id, x]));
-  const root = (x) => (isTransform(x) && !isNamed(x) ? root(byId.get(x.inputs[0])) : x.name);
-  const tools = s.inputs.slice(1).map((id) => root(byId.get(id)));
-  return tools.length ? tools.join(", ") : s.name;
-}
 /** Shows the part as it was at one step of its feature history. */
 function setPreview(id) {
   if (id !== null && playing?.assembly) stopMotion();
+  if (id === null) stopPlayback();
   previewStep = id;
   if (previewObject) {
     world.remove(previewObject);
@@ -1190,6 +1233,142 @@ function setPreview(id) {
   previewObject.add(new THREE.Mesh(g, partMaterial), new THREE.LineSegments(new THREE.EdgesGeometry(g, 28), edgeMaterial));
   bindPose(previewObject, parts.get(selectedPart).matrix);
   world.add(previewObject);
+}
+
+// --- Feature playback: a part's or body's features made one after another ------
+// Each step shows what exists then: every solid made so far that no later feature has used yet.
+// A move turns or slides its input; anything else wipes from its input to its result along the
+// way it grows, with a boolean's tools faint until the wipe passes. It ends on the whole model.
+const STEP_S = 0.7;
+const MODIFIES = new Set(["union", "cut", "intersect", "fillet", "chamfer", "shell", "translate", "rotate", "mirror"]);
+const BOOLEANS = new Set(["union", "cut", "intersect"]);
+let playback = null; // { path, key, steps, i, start, holder, geometries }
+renderer.localClippingEnabled = true;
+const clipped = (base) => {
+  const m = base.clone();
+  m.side = THREE.DoubleSide;
+  m.clippingPlanes = [new THREE.Plane()];
+  return m;
+};
+const buildAfterMaterial = clipped(selectedMaterial);
+const buildBeforeMaterial = clipped(partMaterial);
+const buildToolMaterial = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.25, depthWrite: false, side: THREE.DoubleSide });
+// Edges wipe with the faces they bound, so they share their planes.
+const buildAfterEdgeMaterial = Object.assign(edgeMaterial.clone(), { clippingPlanes: buildAfterMaterial.clippingPlanes });
+const buildBeforeEdgeMaterial = Object.assign(edgeMaterial.clone(), { clippingPlanes: buildBeforeMaterial.clippingPlanes });
+const liveToolMaterial = new THREE.MeshStandardMaterial({ color: 0xb4b8bf, transparent: true, opacity: 0.35, depthWrite: false });
+function startPlayback(path, key, ids) {
+  stopMotion();
+  stopPlayback();
+  clearMeasure();
+  const info = parts.get(path)?.info;
+  if (!info) return;
+  const byId = new Map(info.steps.map((s) => [s.id, s]));
+  const steps = ids.map((id) => byId.get(id)).filter((s) => stepMeshes[path]?.[s.id]);
+  if (!steps.length) return;
+  selectedPart = path;
+  const holder = new THREE.Group();
+  bindPose(holder, parts.get(path).matrix);
+  world.add(holder);
+  playback = { path, key, steps, i: -1, start: performance.now(), holder, geometries: new Map(), edges: new Map() };
+}
+/** A step's mesh with its edges, both kept for the rest of the playback. */
+function playbackSolid(id, material, edges) {
+  const p = playback;
+  const g = playbackGeometry(id);
+  if (!p.edges.has(id)) p.edges.set(id, new THREE.EdgesGeometry(g, 28));
+  const o = new THREE.Group();
+  o.add(new THREE.Mesh(g, material), new THREE.LineSegments(p.edges.get(id), edges));
+  return o;
+}
+function playbackGeometry(id) {
+  const p = playback;
+  if (!p.geometries.has(id)) p.geometries.set(id, geometryOf(stepMeshes[p.path][id]));
+  return p.geometries.get(id);
+}
+/** Lays out step i: the solids alive before it, and the feature itself, ready to animate. */
+function showPlaybackStep(i) {
+  const p = playback, s = p.steps[i];
+  p.i = i;
+  for (const c of [...p.holder.children]) p.holder.remove(c);
+  setPreview(s.id);
+  if (previewObject) previewObject.visible = false;
+  renderDesign();
+  $("parts").querySelector('.row[aria-current="true"]')?.scrollIntoView({ block: "nearest" });
+  const used = (x) => (MODIFIES.has(x.op) ? x.inputs : []);
+  const consumed = new Set(p.steps.slice(0, i + 1).flatMap(used));
+  const last = p.steps.at(-1);
+  // The body's own line runs back from its result along first inputs; anything else is a tool.
+  const main = new Set();
+  const byId = new Map(p.steps.map((x) => [x.id, x]));
+  for (let x = byId.get(last.id); x; x = byId.get(x.inputs[0])) main.add(x.id);
+  for (const x of p.steps.slice(0, i)) {
+    if (consumed.has(x.id)) continue;
+    p.holder.add(main.has(x.id) ? playbackSolid(x.id, partMaterial, edgeMaterial) : new THREE.Mesh(playbackGeometry(x.id), liveToolMaterial));
+  }
+  const meshes = stepMeshes[p.path];
+  const before = MODIFIES.has(s.op) && meshes[s.inputs[0]] ? playbackGeometry(s.inputs[0]) : null;
+  const tools = BOOLEANS.has(s.op) ? s.inputs.slice(1).filter((id) => meshes[id]).map(playbackGeometry) : [];
+  const after = playbackGeometry(s.id);
+  const group = new THREE.Group();
+  group.matrixAutoUpdate = false;
+  p.moving = !!s.move && !!before;
+  group.add(p.moving ? playbackSolid(s.inputs[0], selectedMaterial, edgeMaterial) : playbackSolid(s.id, buildAfterMaterial, buildAfterEdgeMaterial));
+  if (before && !p.moving) group.add(playbackSolid(s.inputs[0], buildBeforeMaterial, buildBeforeEdgeMaterial));
+  for (const g of tools) group.add(new THREE.Mesh(g, buildToolMaterial));
+  p.holder.add(group);
+  p.group = group;
+  p.dir = new THREE.Vector3(...(s.dir ?? [0, 0, 1])).normalize();
+  let lo = Infinity, hi = -Infinity;
+  for (const g of [after, before].filter(Boolean)) {
+    const pos = g.getAttribute("position");
+    for (let k = 0; k < pos.count; k++) {
+      const d = p.dir.x * pos.getX(k) + p.dir.y * pos.getY(k) + p.dir.z * pos.getZ(k);
+      lo = Math.min(lo, d);
+      hi = Math.max(hi, d);
+    }
+  }
+  const pad = (hi - lo) * 0.01 + 1e-6;
+  p.lo = lo - pad;
+  p.hi = hi + pad;
+}
+function stepPlayback(now) {
+  const p = playback;
+  if (!p) return;
+  const t = (now - p.start) / 1000 / STEP_S;
+  if (t >= p.steps.length) {
+    stopPlayback();
+    setPreview(null);
+    renderDesign();
+    return;
+  }
+  const i = Math.floor(t);
+  if (i !== p.i) showPlaybackStep(i);
+  const s = p.steps[i], k = EASE.inOut(t - i);
+  if (p.moving) {
+    if ("by" in s.move) p.group.matrix.makeTranslation(...s.move.by.map((v) => v * k));
+    else {
+      const [ox, oy, oz] = s.move.origin;
+      p.group.matrix.makeTranslation(ox, oy, oz)
+        .multiply(new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(...s.move.axis).normalize(), THREE.MathUtils.degToRad(s.move.degrees * k)))
+        .multiply(new THREE.Matrix4().makeTranslation(-ox, -oy, -oz));
+    }
+  } else {
+    // Clipping planes live in world space; the wipe moves in the part's frame.
+    const matrix = parts.get(p.path).matrix;
+    const local = new THREE.Plane(p.dir.clone().negate(), p.lo + (p.hi - p.lo) * k);
+    buildAfterMaterial.clippingPlanes[0].copy(local).applyMatrix4(matrix);
+    buildBeforeMaterial.clippingPlanes[0].copy(local.negate()).applyMatrix4(matrix);
+    buildToolMaterial.opacity = 0.25 * (1 - k);
+  }
+  p.group.matrixWorldNeedsUpdate = true;
+}
+function stopPlayback() {
+  if (!playback) return;
+  world.remove(playback.holder);
+  for (const g of [...playback.geometries.values(), ...playback.edges.values()]) g.dispose();
+  playback = null;
+  if (previewObject) previewObject.visible = true;
 }
 function setHoveredPart(path) {
   hoveredPart = path;

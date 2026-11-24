@@ -8,6 +8,7 @@
 - declarative: code is pure TypeScript that returns a feature graph; only `src/eval.ts` touches the kernel
 - a part or an assembly is one instance, made to be produced, so a project has a finite set of them; a factory is the code that makes them
 - object oriented: a factory is typed, params are its dimension interface, ports are its connections
+- a part is made of bodies: a body is one connected solid with its own feature history; a feature is one operation vibecad supports, a primitive, a boolean, a transform and the like
 - one file, one instance: a `*.cad.ts` file default-exports one part or assembly, so every one can be built and viewed alone
 - files are modules: assemblies import the instances of other `*.cad.ts` files; factories live in plain `.ts` files
 - libraries and factories are shelves anyone can add to: a library is a folder of instances, a factory folder holds code that makes them; built-in features like `extrude` are factories too
@@ -70,6 +71,8 @@
 - `outerTangent(c1, r1, c2, r2, side)` gives the touch points of a line tangent to two circles
 - features: `union cut intersect fillet chamfer shell translate rotate mirror`
 - structure: `part assembly port mate revolute slider named place`; `part` and `assembly` define factories, and each call makes one instance
+- a part's build returns a solid, `{ solid }`, or `{ bodies: { name: solid } }`; one solid is the body `body`; giving both or no bodies is an error, and a body that is not exactly one solid is `NOT_ONE_SOLID`
+- a part's faces keep their feature names across bodies, so face ids do not name the body; `model.json` lists each part's `bodies` as `{ name, steps }`, the ids of the steps first reached from that body in build order, the body last
 - links: mates and joints join parts into one tree, growing from the ground, or else the first part; a closed loop is `OVER_CONSTRAINED`
 - ground: an assembly's `ground: mate(world, port)` fixes that part facing the world frame (origin, +z up, x along +X), with `gap` and `angle` as in a mate; only the entry's ground counts, and `world` anywhere else is `BAD_MATE`
 - joints: `revolute(a, b, { angle, min, max, gap })`, default range -180 to 180; `slider(a, b, { min, max, travel, angle })`; both are named in an assembly's `joints`
@@ -193,10 +196,13 @@
 - sending carries text, face ids, source lines, 3D points and a screenshot
 - the agent edits the source, the preview rebuilds on save, changed faces glow
 - the agent points back with `vibecad show`
-- selecting a part in the parts list tints it in the view; hovering its row tints it lighter
-- the parts list marks the grounded part with a pin icon
-- the parts list is the instance tree: a placed sub-assembly is a row, named by its place and type, that folds its parts, folded at first; hovering it tints all of them
-- a feature-history list replays any part step by step, next to its source
+- the model tree floats over the view's top left with no panel behind it, each row on its own background: a placed sub-assembly folds its parts, a part its bodies, a body its features; a file of one part opens on it, and a part of one body on that body; everything else starts folded
+- each row starts with an icon of its kind: assembly, part, body, or the feature's op; a sub-assembly or a placed part also shows its type, and hovering one tints all its parts
+- selecting a part row tints it in the view; hovering it tints it lighter; the grounded part has a pin icon
+- every feature is a row, named transforms and unnamed ones alike, in build order, named by its feature name
+- clicking a feature shows its part as it was after it, the rest ghosted, with its source; clicking it again goes back
+- a part's or body's play button plays its features in build order, 0.7 s each, marking the row playing; each step shows every solid made so far that no later feature has used, tools faint; a translate or rotate moves its input into place; anything else wipes from its input to its result along the extrude's direction, or +z, with a boolean's tools fading as the wipe passes; it ends on the whole model
+- its stop button, clicking a feature, playing a motion or the assembly, or switching tabs stops it
 
 ## reference images
 
@@ -297,3 +303,4 @@
 - 2026-11-22: ask before downloading an update, since a release is over 200MB
 - 2026-11-22: animate joints with named motions, played from the viewer
 - 2026-11-23: play an assembly's sequence, derived from its links, from the viewer
+- 2026-11-24: a part is made of named bodies; the model tree moves into the view, lists every feature with an icon of its kind, and plays a part's features in order

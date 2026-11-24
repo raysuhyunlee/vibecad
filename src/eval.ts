@@ -50,6 +50,15 @@ export interface StepInfo {
   inputs: number[];
   volume: number;
   faces: number;
+  /** The way an extrude grows, in the part's frame, so the viewer can play it. */
+  dir?: Vec3;
+  /** A translate's or rotate's own arguments, so the viewer can play the move. */
+  move?: { by: Vec3 } | { origin: Vec3; axis: Vec3; degrees: number };
+}
+/** A body of a part and its features, the ids of steps first reached from it, in build order; the last is the body. */
+export interface BodyInfo {
+  name: string;
+  steps: number[];
 }
 export interface Bbox {
   min: Vec3;
@@ -65,6 +74,7 @@ export interface PartResult {
   bbox: Bbox;
   faces: FaceInfo[];
   steps: StepInfo[];
+  bodies: BodyInfo[];
 }
 export interface CheckResult {
   name: string;
@@ -1320,11 +1330,11 @@ function sequenceOf(leaves: Node[], parent: Map<Node, Node>, approach: Map<Node,
 // --- Build ------------------------------------------------------------------
 
 function collectLeaves(node: Node, out: Node[]) {
-  if (node.inst.solid) out.push(node);
+  if (node.inst.bodies) out.push(node);
   for (const c of node.children.values()) collectLeaves(c, out);
 }
 function collectAssemblies(node: Node, out: PlaceResult[]) {
-  if (node.path && !node.inst.solid) out.push({ path: node.path, type: node.inst.typeName, src: node.inst.src });
+  if (node.path && !node.inst.bodies) out.push({ path: node.path, type: node.inst.typeName, src: node.inst.src });
   for (const c of node.children.values()) collectAssemblies(c, out);
 }
 function collectChecks(node: Node, out: Array<{ c: CheckDef; scope: Node }>) {
@@ -1440,14 +1450,26 @@ export interface PartStore {
 
 function evalPart(ev: Evaluator, inst: Instance, withSteps: boolean): PartBuild {
   const k = ev.k;
-  const solid = inst.solid!;
-  const e = ev.eval(solid);
+  const named = Object.entries(inst.bodies!);
+  const evaluated = named.map(([name, solid]) => {
+    const e = ev.eval(solid);
+    const pieces = k.getSubShapes(e.shape, "solid");
+    if (pieces.length !== 1) {
+      // Name each piece by the features its faces come from, so the loose one is easy to find.
+      const named = pieces.map((p) => `[${[...new Set(ev.faces(p).map((f) => e.tags.get(ev.hash(f))?.node.name))].join(", ")}]`);
+      throw new CadError("NOT_ONE_SOLID", `Body "${name}" of ${inst.typeName} is ${pieces.length} solids, not one: ${named.join(" ")}`, solid.src,
+        "Join the pieces, or give each its own body: part(..., () => ({ bodies: { a, b } }))");
+    }
+    return e;
+  });
+  const shape = evaluated.length === 1 ? evaluated[0]!.shape : k.makeCompound(evaluated.map((e) => e.shape));
+  const tags = new Map(evaluated.flatMap((e) => [...e.tags]));
   const seen = new Map<string, number>();
   const faceIndex = new Map<number, number>();
-  const faces: FaceInfo[] = ev.faces(e.shape).map((f, i) => {
+  const faces: FaceInfo[] = ev.faces(shape).map((f, i) => {
     const h = ev.hash(f);
     faceIndex.set(h, i);
-    const t = e.tags.get(h)!;
+    const t = tags.get(h)!;
     const n = (seen.get(t.name) ?? 0) + 1;
     seen.set(t.name, n);
     return {
@@ -1463,33 +1485,44 @@ function evalPart(ev: Evaluator, inst: Instance, withSteps: boolean): PartBuild 
   const steps: StepInfo[] = [];
   const stepMeshes = new Map<number, MeshData>();
   const visit = new Set<Solid>();
+  let own: number[] = [];
   const walk = (n: Solid) => {
     if (visit.has(n)) return;
     visit.add(n);
     n.inputs.forEach(walk);
     const r = ev.eval(n);
+    const a = n.args as any;
+    const plane = n.op === "extrude" ? ev.sketchPlane(n, a.on) : undefined;
     steps.push({
       id: n.id, op: n.op, name: n.name, src: n.src,
       inputs: n.inputs.map((i) => i.id),
       volume: round(k.getVolume(r.shape)),
       faces: r.tags.size,
+      ...(n.op === "extrude" && { dir: (plane?.z ?? [0, 0, 1]).map((v: number) => v * Math.sign(a.height)) as Vec3 }),
+      ...(n.op === "translate" && { move: { by: [a.x, a.y, a.z] as Vec3 } }),
+      ...(n.op === "rotate" && { move: { origin: a.origin, axis: a.axis, degrees: a.degrees } }),
     });
+    own.push(n.id);
     if (withSteps) stepMeshes.set(n.id, toMesh(k, r.shape, "", () => -1));
   };
-  walk(solid);
+  const bodies: BodyInfo[] = named.map(([name, solid]) => {
+    own = [];
+    walk(solid);
+    return { name, steps: own };
+  });
 
   return {
     part: {
       path: "", type: inst.typeName, params: inst.params, src: inst.src,
-      volume: round(k.getVolume(e.shape)), bbox: bboxOf(k, e.shape), faces, steps,
+      volume: round(k.getVolume(shape)), bbox: bboxOf(k, shape), faces, steps, bodies,
     },
     mesh: {
-      ...toMesh(k, e.shape, "", (h) => faceIndex.get(h) ?? -1),
-      faceGeom: ev.faces(e.shape).map((f) => faceGeomOf(k, f)),
-      edges: edgesOf(k, e.shape),
+      ...toMesh(k, shape, "", (h) => faceIndex.get(h) ?? -1),
+      faceGeom: ev.faces(shape).map((f) => faceGeomOf(k, f)),
+      edges: edgesOf(k, shape),
     },
     ...(withSteps && { steps: stepMeshes }),
-    shape: e.shape,
+    shape,
   };
 }
 
@@ -1533,7 +1566,7 @@ export async function build(
   const query = (scope: Node, at: Pose, shapeOf: (n: Node) => ShapeHandle): Query => {
     const of = (i: Instance) => {
       const n = find(scope, i);
-      if (!n?.inst.solid) throw new Error(`${i.typeName} is not a part of this build`);
+      if (!n?.inst.bodies) throw new Error(`${i.typeName} is not a part of this build`);
       return shapeOf(n);
     };
     return {

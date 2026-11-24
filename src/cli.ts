@@ -165,7 +165,7 @@ function inputsOf(file: string, inst: Instance, steps: boolean): BuildInputs {
     s.inputs.forEach(walk);
   };
   const parts = (i: Instance) => {
-    if (i.solid) walk(i.solid);
+    Object.values(i.bodies ?? {}).forEach(walk);
     Object.values(i.children).forEach(parts);
   };
   parts(inst);

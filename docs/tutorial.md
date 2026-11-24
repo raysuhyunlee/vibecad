@@ -6,6 +6,7 @@ How to lay out a vibecad project, from a real case: a four-legged robot whose le
 
 - A part or an assembly is an instance: one thing you produce. A project has a finite set of them.
 - A factory is code that makes instances: `part(...)` and `assembly(...)` return one.
+- A part is made of bodies, each one connected solid. Return `solid` for one body, or `bodies: { shell, lid }` for several, such as two prints that ship together; pieces that are separate parts go in separate files.
 - A `*.cad.ts` file is one instance, its default export. It opens alone in the app and with every command.
 - A factory that one instance uses stays unexported in that file. A factory several instances share goes in a plain `.ts` file.
 

@@ -294,6 +294,37 @@ button { font: inherit; color: inherit; }
 }
 #empty button { pointer-events: auto; }
 #empty-text { padding: var(--s2) var(--s3); border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+#parts {
+  position: absolute;
+  top: var(--s3);
+  left: var(--s3);
+  max-width: 280px;
+  max-height: calc(100% - 2 * var(--s3) - 56px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  pointer-events: none;
+}
+#parts > * { pointer-events: auto; max-width: 100%; }
+#parts .row { width: auto; max-width: 100%; align-items: center; gap: var(--s1); background: var(--panel); }
+#parts .row:hover { background: var(--hover); }
+#parts .row[aria-current="true"] { background: var(--accent); }
+#parts .row[aria-current="true"] .dim { color: inherit; }
+#parts .twisty { width: 12px; height: 12px; flex: none; color: var(--muted); }
+#parts [aria-expanded="true"] > .twisty { transform: rotate(90deg); }
+.item { display: flex; align-items: center; gap: 2px; }
+.item .row { min-width: 0; }
+.item .icon { width: 24px; height: 24px; opacity: 0; background: var(--panel); }
+.item .icon svg { width: 12px; height: 12px; }
+.item .icon:hover { background: var(--hover); }
+.item .icon[aria-pressed="true"] { background: var(--accent); }
+.item:hover .icon, .item .icon:focus-visible, .item .icon[aria-pressed="true"] { opacity: 1; }
+.item .icon .on, .item .icon[aria-pressed="true"] .off { display: none; }
+.item .icon[aria-pressed="true"] .on { display: block; }
+#parts .kind { width: 14px; height: 14px; flex: none; color: var(--muted); }
+#parts .row[aria-current="true"] .kind { color: inherit; }
 #gizmo { position: absolute; top: var(--s3); right: var(--s3); width: 112px; height: 112px; }
 #tools {
   position: absolute;

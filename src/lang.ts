@@ -636,7 +636,7 @@ export function stepEntry(file: string): Instance {
   const src: Src = { file, line: 1, col: 1 };
   const name = basename(file).replace(STEP_FILE, "");
   const solid = new Solid("importStep", { path: resolve(file) }, [], src, name);
-  return new Instance({ typeName: name, params: {}, src, solid });
+  return new Instance({ typeName: name, params: {}, src, bodies: { [BODY]: solid } });
 }
 /** Fuses solids into one. */
 export function union(first: Solid, ...rest: Array<Solid | Solid[]>): Solid {
@@ -784,7 +784,8 @@ export class Instance<P extends string = string> {
   readonly typeName: string;
   readonly params: unknown;
   readonly src: Src;
-  readonly solid?: Solid;
+  /** A part's bodies by name, each one solid with its own feature history; absent on an assembly. */
+  readonly bodies?: Record<string, Solid>;
   readonly ports: Record<string, PortDef | PortRef>;
   readonly children: Record<string, Instance>;
   readonly mates: MateDef[];
@@ -797,7 +798,7 @@ export class Instance<P extends string = string> {
     typeName: string;
     params: unknown;
     src: Src;
-    solid?: Solid;
+    bodies?: Record<string, Solid>;
     ports?: Record<string, PortDef | PortRef>;
     children?: Record<string, Instance>;
     mates?: MateDef[];
@@ -810,7 +811,7 @@ export class Instance<P extends string = string> {
     if (init.ground) this.ground = init.ground;
     this.params = init.params;
     this.src = init.src;
-    if (init.solid) this.solid = init.solid;
+    if (init.bodies) this.bodies = init.bodies;
     this.ports = init.ports ?? {};
     this.children = init.children ?? {};
     this.mates = init.mates ?? [];
@@ -842,10 +843,23 @@ export const world: PortRef = {
 
 type Args<P> = {} extends P ? [params?: P] : [params: P];
 
+/** The name of a part's only body when it gives one `solid`. */
+export const BODY = "body";
+function bodiesOf(r: { solid?: Solid; bodies?: Record<string, Solid> }, typeName: string): Record<string, Solid> {
+  if (r.solid && r.bodies) throw new Error(`${typeName} gives both solid and bodies; give one`);
+  if (r.solid) return { [BODY]: r.solid };
+  const bodies = Object.entries(r.bodies ?? {});
+  if (!bodies.length) throw new Error(`${typeName} has no bodies; give solid or bodies`);
+  for (const [name, b] of bodies) {
+    if (!(b instanceof Solid)) throw new Error(`${typeName}'s body "${name}" is not a solid`);
+  }
+  return r.bodies!;
+}
+
 /** Defines a part factory. Params are its dimension interface; ports its connections. Each call makes one part. */
 export function part<P extends object, K extends string = never>(
   typeName: string,
-  build: (params: P) => Solid | { solid: Solid; ports?: Record<K, PortDef>; checks?: CheckDef[] },
+  build: (params: P) => Solid | ({ ports?: Record<K, PortDef>; checks?: CheckDef[] } & ({ solid: Solid } | { bodies: Record<string, Solid> })),
 ) {
   return (...args: Args<P>): Instance<K> => {
     const params = (args[0] ?? {}) as P;
@@ -855,9 +869,9 @@ export function part<P extends object, K extends string = never>(
     try {
       const r = build(params);
       return r instanceof Solid
-        ? new Instance<K>({ typeName, params, src, solid: r })
+        ? new Instance<K>({ typeName, params, src, bodies: { [BODY]: r } })
         : new Instance<K>({
-            typeName, params, src, solid: r.solid,
+            typeName, params, src, bodies: bodiesOf(r, typeName),
             ...(r.ports && { ports: r.ports }),
             ...(r.checks && { checks: r.checks }),
           });
@@ -876,7 +890,7 @@ export function originOf<P extends string>(inst: Instance<P>): Instance<P> {
 export function place<P extends string>(inst: Instance<P>): Instance<P> {
   const copy = new Instance<P>({
     typeName: inst.typeName, params: inst.params, src: callerSrc(),
-    ...(inst.solid && { solid: inst.solid }),
+    ...(inst.bodies && { bodies: inst.bodies }),
     ports: inst.ports, children: inst.children, mates: inst.mates, joints: inst.joints, motions: inst.motions, checks: inst.checks,
     ...(inst.ground && { ground: inst.ground }),
   });

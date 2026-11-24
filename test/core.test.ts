@@ -752,7 +752,7 @@ test("a closed loop of joints is refused", async () => {
 test("sweeps run only when asked, and report the first colliding value", async () => {
   // The arm turns from +x toward -y, into a post standing at y = -15.
   const stand = part("Stand", () => ({
-    solid: box(10, 10, 1).named("base").union(box(2, 2, 10).named("post").translate(0, -15, 0)),
+    bodies: { base: box(10, 10, 1).named("base"), post: box(2, 2, 10).named("post").translate(0, -15, 0) },
     ports: { pivot: port([0, 0, 1]) },
   }));
   const swing = (max: number) => assembly("Swing", () => {
@@ -899,4 +899,20 @@ test("a thread builds face by face, and taps a bored hole that a swept helix can
   assert.ok(plain.volume - tapped.volume > Math.PI * (4.75 ** 2 - 4.6 ** 2) * 4 * 0.9);
   const groove = sweep(polygon([[-0.2, -0.4], [0.5, -0.05], [0.5, 0.05], [-0.2, 0.4]]), helix(4.6, 1, 5)).named("groove");
   await assert.rejects(build(part("P", () => ring().cut([groove]))()), (e: CadError) => e.code === "CUT_NO_EFFECT");
+});
+
+test("a part's bodies each list their own features, and a body must be one solid", async () => {
+  const pair = part("Pair", () => {
+    const base = box(10, 10, 2).named("base");
+    const post = extrude(circle(2), 5, onFace(base, "base.top")).named("post");
+    return { bodies: { base, post: post.translate(20, 0, 0) } };
+  });
+  const { model } = await build(pair());
+  const p = model.parts[0]!;
+  const name = (id: number) => p.steps.find((s) => s.id === id)!.name;
+  assert.deepEqual(p.bodies.map((b) => [b.name, b.steps.map(name)]), [["base", ["base"]], ["post", ["post", "translate1"]]]);
+  assert.deepEqual(p.steps.find((s) => s.name === "post")!.dir, [0, 0, 1]);
+  assert.ok(p.faces.some((f) => f.id === "post.top") && p.faces.some((f) => f.id === "base.top"));
+  const split = part("Split", () => box(4, 4, 1).union(box(4, 4, 1).translate(10, 0, 0)));
+  await assert.rejects(build(split()), (e: CadError) => e.code === "NOT_ONE_SOLID");
 });
