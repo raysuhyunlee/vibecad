@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "productName": "Vibecad",
   "description": "A CAD for agents, and a feedback system for humans",
+  "license": "Apache-2.0",
   "type": "module",
   "private": true,
   "engines": {
@@ -31,7 +32,10 @@
       "viewer/**",
       "libs/**",
       "factories/**",
-      "package.json"
+      "package.json",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
+      "licenses/**"
     ],
     "extraResources": [
       {
