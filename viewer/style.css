@@ -143,8 +143,6 @@ button { font: inherit; color: inherit; }
 /* The image browser covers the view: a grid of the file's images, or a strip of them over the one open. */
 #gallery { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; background: var(--bg); }
 #gallery[hidden], #gallery [hidden] { display: none; }
-#gallery.overlay { background: transparent; pointer-events: none; }
-#gallery.overlay #strip, #gallery.overlay #photo-labels { display: none; }
 #strip { display: flex; align-items: center; gap: var(--s2); flex: none; padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); background: var(--panel); }
 #strip-list { display: flex; gap: var(--s1); overflow-x: auto; }
 #strip-list button { flex: none; width: 56px; height: 56px; padding: 0; border: 2px solid transparent; border-radius: 6px; overflow: hidden; background: var(--hover); cursor: pointer; }
@@ -168,7 +166,6 @@ button { font: inherit; color: inherit; }
 #photo-img, #photo-svg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 #photo-svg { cursor: crosshair; touch-action: none; }
 #photo-svg circle { fill: var(--accent); stroke: #fff; stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: grab; }
-#photo.overlay #photo-svg circle { display: none; }
 #photo-labels { position: absolute; inset: 0; pointer-events: none; }
 /* Dims drawn CAD style in screen pixels; the white glow keeps them readable on any photo. */
 #photo-decor { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff); }
@@ -227,7 +224,6 @@ button { font: inherit; color: inherit; }
   background: var(--panel);
 }
 #photo-bar [hidden] { display: none; }
-#photo-opacity { width: 100px; accent-color: var(--accent); }
 .segmented { display: flex; gap: 2px; }
 .segmented button { height: 28px; padding: 0 var(--s3); border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
 .segmented button:hover { background: var(--hover); }

@@ -222,15 +222,13 @@
 - the image browser shows the file's images in a grid, with a tile to add more; deleting one, after a confirm, removes its jpg and json
 - opening an image shows a strip of the file's images on top, the open one marked, and the image below; a grid button goes back to the grid; going to the model and back reopens it
 - the browser's button sends a message with no text: `Model from N new images` while there are added images, else `Update model`, enabled while some image's dims changed
-- photo mode: the image fills the space below the strip with its dims; the person types values, drags end points (a diameter's or radius's are its center and a point on its circle at its arrow, which sizes a diameter or moves a radius along), drags on the image to add a dim, or removes one
+- an open image fills the space below the strip with its dims; the person types values, drags end points (a diameter's or radius's are its center and a point on its circle at its arrow, which sizes a diameter or moves a radius along), drags on the image to add a dim, or removes one
 - dims are drawn CAD style, with arrows at both ends; a radius has one, on the circle; a dim the agent asks for is dashed
 - a label holds the value, with `Ø` or `R` before a diameter or radius; its name shows on hover or while typing
 - a length's label reads along its line, above or below it; when it does not fit between the arrows it goes beyond one end, and the line runs on to it; when it covers another label, a line or an end point, or runs close beside another dim's line, arrows or label, the line and its arrows move off its points, parallel, with an extension line square to it from each point
 - a diameter draws its circle, a radius the arc of its circle around its end; its line turns about the center instead of moving off, so concentric ones turn apart, and its label follows the length rules, a diameter's also sitting off its center
 - an angle is an arc between its rays, its label outside the arc; when the label does not fit, it goes beyond one end and the arc runs on to it; the arc grows to clear other labels, and rays reach it with extension lines
 - the person draws lengths; the agent may ask any kind
-- overlay mode: the image sits faded over the model and passes the pointer through, so the person orbits the model to match the image; the screenshot sent carries both
-- `P` switches between the two modes
 - the person's unsent dims stay with their image when another opens, and go with the next message
 - every message sent with an image open, added, or with changed dims lists all the images of its file with their dims, as views of one object; sending saves the person's dims first, and needs no text when they changed
 - an update from the agent keeps the person's unsent edits
@@ -269,7 +267,7 @@
 - wip: drawn strokes stay in place when a joint moves; pins follow their part
 - wip: sketch constraint solver, draft, drawings, sheet metal
 - wip: isolating the agent from the person's global settings
-- wip: reference images: match the overlay camera to the image from dim end points; zoom the image
+- wip: reference images: zoom the image
 - not yet verified: how close the agent places asked dims on real photos and sketches
 - wip: npm distribution. Node will not strip types under `node_modules`, so vibecad runs from this repo today; a release needs compiled output
 - not yet verified: identical geometry across macOS, Linux and Windows; large assemblies; real microphone input; a successful codex turn

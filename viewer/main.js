@@ -79,7 +79,7 @@ let loadToken = 0;
 const collapsed = new Set();
 const LAST_OPENED = "vibecad.lastOpened";
 // The open reference image. edited and removed hold the person's unsent changes, by dim id.
-const photo = { name: null, doc: null, mode: "edit", edited: new Set(), removed: new Set(), drag: null };
+const photo = { name: null, doc: null, edited: new Set(), removed: new Set(), drag: null };
 let photoList = []; // { name, entry } of every image in the project
 const added = new Set(); // images added since the last send; they go with the next message
 const drafts = new Map(); // name -> { dims, edited, removed }: unsent dims of images not open
@@ -839,15 +839,6 @@ function screenshot() {
   ctx.fillRect(0, 0, out.width, out.height);
   ctx.drawImage(src, 0, 0, out.width, out.height);
   const k = out.width / stage.clientWidth;
-  const img = $("photo-img");
-  if (photo.name && photo.mode === "overlay" && img.naturalWidth) {
-    // The agent sees what the person compares: the image faded over the model.
-    const w = img.naturalWidth, h = img.naturalHeight;
-    const s = Math.min(stage.clientWidth / w, stage.clientHeight / h);
-    ctx.globalAlpha = Number($("photo-opacity").value);
-    ctx.drawImage(img, ((stage.clientWidth - w * s) / 2) * k, ((stage.clientHeight - h * s) / 2) * k, w * s * k, h * s * k);
-    ctx.globalAlpha = 1;
-  }
   drawInk(ctx, k);
   for (const r of refs) {
     const s = project(r.point);
@@ -1771,15 +1762,12 @@ function renderGallery() {
   const names = opened.entry ? photosHere() : [];
   const open = !!photo.name;
   $("gallery").hidden = !images;
-  $("gallery").classList.toggle("overlay", open && photo.mode === "overlay");
   $("grid").hidden = open;
   $("strip").hidden = $("photo").hidden = !open;
   $("photo-bar").hidden = !opened.entry || (!names.length && !images);
   $("show-model").setAttribute("aria-pressed", !images);
   $("show-images").setAttribute("aria-pressed", images);
   $("show-images").textContent = names.length ? `Images (${names.length})` : "Images";
-  $("photo-modes").hidden = !open;
-  $("photo-opacity").hidden = !open || photo.mode !== "overlay";
   if (images && !open) $("grid").replaceChildren(...names.map(gridTile), addTile());
   if (open) {
     $("strip-list").replaceChildren(...names.map(stripThumb));
@@ -1892,7 +1880,8 @@ async function openPhoto(name) {
   Object.assign(photo, { name, doc: draft ? mergeDims(doc, draft) : doc, drag: null, edited: draft?.edited ?? new Set(), removed: draft?.removed ?? new Set() });
   $("photo-img").src = photoUrl(name);
   view = "images";
-  setPhotoMode("edit");
+  renderGallery();
+  renderPhoto();
   updateSend();
 }
 function closePhoto() {
@@ -1900,14 +1889,6 @@ function closePhoto() {
   Object.assign(photo, { name: null, doc: null, drag: null, edited: new Set(), removed: new Set() });
   renderGallery();
   updateSend();
-}
-function setPhotoMode(mode) {
-  photo.mode = mode;
-  $("photo").style.opacity = mode === "overlay" ? $("photo-opacity").value : "";
-  $("photo-edit").setAttribute("aria-pressed", mode === "edit");
-  $("photo-overlay").setAttribute("aria-pressed", mode === "overlay");
-  renderGallery();
-  renderPhoto();
 }
 /** The agent rewrote the image's json: take it, keeping the person's unsent edits. */
 async function photosChanged(e) {
@@ -2180,9 +2161,6 @@ stage.addEventListener("drop", (e) => {
   e.preventDefault();
   addPhotos([...e.dataTransfer.files].filter((f) => f.type.startsWith("image/")));
 });
-$("photo-edit").onclick = () => setPhotoMode("edit");
-$("photo-overlay").onclick = () => setPhotoMode("overlay");
-$("photo-opacity").oninput = () => ($("photo").style.opacity = $("photo-opacity").value);
 $("show-model").onclick = () => setView("model");
 $("show-images").onclick = () => setView("images");
 $("all-photos").onclick = () => {
@@ -2455,7 +2433,7 @@ addEventListener("keydown", (e) => {
   if (e.code === "Space") {
     e.preventDefault();
     if (!e.repeat) startListening();
-  } else if ((e.key === "p" || e.key === "P") && photo.name) setPhotoMode(photo.mode === "edit" ? "overlay" : "edit");
+  }
   else if (e.key === "i" || e.key === "I") setView(view === "model" ? "images" : "model");
   else if (e.key === "d" || e.key === "D") setDraw(!drawMode);
   else if (e.key === "f" || e.key === "F") fit();
