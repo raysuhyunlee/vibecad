@@ -8,7 +8,7 @@
 
 ## 설치 방법
 
-[최신 릴리스 페이지](https://github.com/raysuhyunlee/vibecad/releases/latest)에서 플랫폼에 맞는 파일을 받아 설치합니다.
+[최신 릴리스 페이지](https://github.com/raysuhyunlee/vibecad/releases/latest) 위쪽의 **Downloads**에서 플랫폼에 맞는 링크를 눌러 설치 파일을 받습니다.
 
 | 플랫폼 | 파일 |
 | --- | --- |
@@ -48,7 +48,5 @@
 ```text
 바이브캐드로 M3 나사 4개로 고정하는 SG90 서보 브래킷 설계해 줘. vibecad --help 부터 확인해.
 ```
-
-![Claude Code에서 바이브캐드로 설계하기](assets/guide-ko/cli.png)
 
 에이전트가 만든 모델은 앱에서도 바로 열립니다. 주요 명령: `build`, `test`, `render`, `export`(STEP/STL). 전체 목록은 `vibecad --help`.
