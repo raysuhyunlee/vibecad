@@ -9,6 +9,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import updater from "electron-updater";
+import { installCli } from "./cli-path.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const ICON = fileURLToPath(new URL("./assets/icon.png", import.meta.url));
@@ -297,8 +298,14 @@ function watchUpdates() {
   setInterval(check, UPDATE_CHECK_MS);
 }
 
+// The AppImage launcher runs the app with VIBECAD_CLI set: relay to the CLI and exit with its code.
+if (process.env.VIBECAD_CLI) {
+  const { VIBECAD_CLI, ...env } = process.env;
+  spawn(process.execPath, [CLI, ...process.argv.slice(1)], { cwd: env.OWD || process.cwd(), env: { ...env, ELECTRON_RUN_AS_NODE: "1" }, stdio: "inherit" })
+    .on("exit", (code) => app.exit(code ?? 1));
+}
 // One app at a time: a second launch shows the open window.
-if (!app.requestSingleInstanceLock()) app.quit();
+else if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on("second-instance", () => {
     const active = splash ?? win;
@@ -310,6 +317,10 @@ else {
     protocol.handle("vibecad", forward);
     app.dock?.setIcon(ICON);
     showSplash();
+    if (app.isPackaged) {
+      try { installCli({ home: homedir(), exe: process.execPath, cli: CLI, appImage: process.env.APPIMAGE }); }
+      catch (e) { console.error("could not install the vibecad command:", e.message); }
+    }
   });
 }
 app.on("window-all-closed", () => app.quit());

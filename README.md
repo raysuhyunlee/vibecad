@@ -71,3 +71,4 @@ test/      tests
 | --- | --- |
 | `spec/overview.md` | Tech spec: principles, stack, language, feedback loop, sessions |
 | `docs/tutorial.md` | Modeling tutorial for agents: project layout, instances and factories |
+| `docs/guide-ko.md` | Install and usage guide for Korean users |
