@@ -157,6 +157,8 @@ const codex: Adapter = {
   command(session, model) {
     const options = [
       "--json",
+      // A project need not be a git repo or one the person has trusted in codex.
+      "--skip-git-repo-check",
       "-c", 'sandbox_mode="workspace-write"',
       ...(model ? ["-m", model] : []),
     ];

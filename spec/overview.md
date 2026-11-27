@@ -266,6 +266,7 @@
 - claude only for now: transcripts under `~/.claude/projects/`; codex lists none
 - messages sent during a turn queue and go in the next turn; stop is one button
 - permissions are preset for the session: file edits and the vibecad CLI
+- codex runs with `--skip-git-repo-check`, since a project need not be a git repo or trusted in codex
 - no MCP: claude runs with `--strict-mcp-config` and no servers; codex `exec` refuses MCP calls, since it never asks for approval
 
 ## status
