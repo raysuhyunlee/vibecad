@@ -2232,39 +2232,53 @@ function renderAgent() {
     return item;
   }));
 }
+// One menu serves the agent, model and thinking pickers, under the button that opened it.
+let menuOwner = null;
 function hideAgentMenu() {
   $("agent-menu").hidden = true;
-  $("agent").setAttribute("aria-expanded", "false");
+  menuOwner?.setAttribute("aria-expanded", "false");
+  menuOwner = null;
 }
-$("agent").onclick = () => {
-  if (!$("agent-menu").hidden) return hideAgentMenu();
+/** items: { label, dim?, current, disabled?, title?, pick } */
+function openMenu(owner, items) {
+  const again = menuOwner === owner;
+  hideAgentMenu();
+  if (again) return;
   const menu = $("agent-menu");
-  menu.replaceChildren(...agents.map((a) => {
-    const b = row(a.name, a.installed ? "" : "Not installed", a.id === agentId, async () => {
-      if (!a.installed) return;
+  menu.replaceChildren(...items.map((it) => {
+    const b = row(it.label, it.dim ?? "", it.current, () => {
+      if (it.disabled) return;
       hideAgentMenu();
-      if (a.id === agentId) return;
-      const res = await post("/agent", { id: a.id });
-      if (!res.ok) addMessage({ role: "agent", kind: "error", text: (await res.json()).error });
+      if (!it.current) it.pick();
     });
     b.setAttribute("role", "menuitemradio");
-    b.setAttribute("aria-checked", String(a.id === agentId));
-    // Not disabled, so its tooltip with the install command still shows.
-    if (!a.installed) {
-      b.setAttribute("aria-disabled", "true");
-      b.title = a.install;
-    }
+    b.setAttribute("aria-checked", String(it.current));
+    // Not disabled, so its tooltip still shows.
+    if (it.disabled) b.setAttribute("aria-disabled", "true");
+    if (it.title) b.title = it.title;
     return b;
   }));
-  const box = $("agent").getBoundingClientRect();
+  const box = owner.getBoundingClientRect();
   menu.hidden = false;
-  menu.style.left = `${Math.min(box.left, innerWidth - menu.offsetWidth - 8)}px`;
+  menu.style.left = `${Math.max(8, Math.min(box.left, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${box.bottom + 4}px`;
-  $("agent").setAttribute("aria-expanded", "true");
+  menuOwner = owner;
+  owner.setAttribute("aria-expanded", "true");
   menu.querySelector("button")?.focus();
-};
+}
+$("agent").onclick = () => openMenu($("agent"), agents.map((a) => ({
+  label: a.name,
+  dim: a.installed ? "" : "Not installed",
+  current: a.id === agentId,
+  disabled: !a.installed,
+  title: a.installed ? "" : a.install,
+  pick: async () => {
+    const res = await post("/agent", { id: a.id });
+    if (!res.ok) addMessage({ role: "agent", kind: "error", text: (await res.json()).error });
+  },
+})));
 addEventListener("pointerdown", (e) => {
-  if (!$("agent-menu").hidden && !$("agent-menu").contains(e.target) && !$("agent").contains(e.target)) hideAgentMenu();
+  if (!$("agent-menu").hidden && !$("agent-menu").contains(e.target) && !menuOwner?.contains(e.target)) hideAgentMenu();
 });
 function noAgentError(text) {
   $("no-agent-error").textContent = text;
@@ -2287,10 +2301,175 @@ $("agents-check").onclick = async () => {
   }
 };
 
+// --- Model and thinking level of the agent in use; unset is the agent's default ------------
+// The button by the mic names the model; its popover sets the level on a slider, and the model from a list.
+let modelState = { model: null, effort: null, models: [], defaultModel: null, defaultEffort: null };
+const titleCase = (s) => s[0].toUpperCase() + s.slice(1);
+const nameOf = (id) => modelState.models.find((m) => m.id === id)?.name ?? id;
+/** The model in use: the picked one, else the agent's default. */
+const current = () => {
+  const id = modelState.model ?? modelState.defaultModel;
+  return { id, entry: modelState.models.find((m) => m.id === id) };
+};
+const modelName = () => (current().id ? nameOf(current().id) : "Default model");
+/** The level in use: the picked one, else the agent's default for the model. */
+const effortInUse = () => modelState.effort ?? modelState.defaultEffort ?? current().entry?.defaultEffort ?? null;
+/** The levels of the model in use; when it is unknown, every level some model has, in order. */
+function efforts() {
+  const { entry } = current();
+  return entry ? entry.efforts : [...new Set(modelState.models.flatMap((x) => x.efforts))];
+}
+function renderModel() {
+  const show = !$("agent").hidden && modelState.models.length > 0;
+  $("model").hidden = !show;
+  $("model").querySelector("span").textContent = modelName();
+  $("model").setAttribute("aria-label", `Model: ${modelName()}`);
+  if (!show) hideModelPop();
+  else if (!$("model-pop").hidden) renderModelPop();
+}
+/** Draws the slider at step i of levels; -1 draws no thumb, for the default. */
+function drawSlider(levels, i) {
+  const el = $("effort-slider");
+  const at = (j) => `calc(var(--pad) + (100% - 2 * var(--pad)) * ${levels.length > 1 ? j / (levels.length - 1) : 0.5})`;
+  const parts = [];
+  if (i >= 0) {
+    const fill = document.createElement("div");
+    fill.className = "fill";
+    fill.style.width = `calc(${at(i)} + var(--pad))`;
+    parts.push(fill);
+  }
+  levels.forEach((_, j) => {
+    if (j <= i) return;
+    const dot = document.createElement("div");
+    dot.className = "dot";
+    dot.style.left = at(j);
+    parts.push(dot);
+  });
+  if (i >= 0) {
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    thumb.style.left = at(i);
+    parts.push(thumb);
+  }
+  el.replaceChildren(...parts);
+  el.setAttribute("aria-valuemin", "0");
+  el.setAttribute("aria-valuemax", String(Math.max(0, levels.length - 1)));
+  el.setAttribute("aria-valuenow", String(Math.max(0, i)));
+  el.setAttribute("aria-valuetext", i >= 0 ? titleCase(levels[i]) : "Default");
+}
+/** The level as a label: a default one says so. */
+function effortLabel() {
+  const e = effortInUse();
+  if (modelState.effort) return `${titleCase(e)} thinking`;
+  return e ? `Default thinking (${titleCase(e)})` : "Default thinking";
+}
+function renderModelPop() {
+  const levels = efforts();
+  $("model-list-open").querySelector("span").textContent = modelName();
+  $("effort-name").textContent = effortLabel();
+  $("effort-reset").disabled = !modelState.effort;
+  $("effort-slider").hidden = levels.length === 0;
+  drawSlider(levels, levels.indexOf(effortInUse()));
+  const { defaultModel } = modelState;
+  $("model-list").replaceChildren(
+    ...[{ id: null, name: defaultModel ? `Default (${nameOf(defaultModel)})` : "Default" }, ...modelState.models].map((m) => {
+      const b = row(m.name, "", m.id === modelState.model, () => {
+        showModelList(false);
+        if (m.id !== modelState.model) pickModel(m.id, modelState.effort);
+      });
+      b.setAttribute("role", "menuitemradio");
+      b.setAttribute("aria-checked", String(m.id === modelState.model));
+      return b;
+    }),
+  );
+}
+function showModelList(on) {
+  $("effort-view").hidden = on;
+  $("model-list").hidden = !on;
+  (on ? $("model-list").querySelector("[aria-current]") ?? $("model-list").querySelector("button") : $("effort-slider")).focus();
+}
+function hideModelPop() {
+  $("model-pop").hidden = true;
+  $("model").setAttribute("aria-expanded", "false");
+}
+$("model").onclick = () => {
+  if (!$("model-pop").hidden) return hideModelPop();
+  hideAgentMenu();
+  const pop = $("model-pop");
+  pop.hidden = false;
+  renderModelPop();
+  $("effort-view").hidden = false;
+  $("model-list").hidden = true;
+  const box = $("model").getBoundingClientRect();
+  pop.style.left = `${Math.max(8, Math.min(box.left, innerWidth - pop.offsetWidth - 8))}px`;
+  // Anchored by its bottom, so the taller model list grows upward.
+  pop.style.bottom = `${innerHeight - box.top + 8}px`;
+  $("model").setAttribute("aria-expanded", "true");
+  pop.focus();
+};
+$("model-list-open").onclick = () => showModelList(true);
+$("effort-reset").onclick = () => pickModel(modelState.model, null);
+function pickModel(model, effort) {
+  // Shown at once; the server's hello confirms it.
+  modelState = { ...modelState, model, effort };
+  renderModel();
+  post("/model", { model, effort }).then(async (res) => {
+    if (!res.ok) addMessage({ role: "agent", kind: "error", text: (await res.json()).error });
+  });
+}
+const pickEffort = (i) => {
+  const levels = efforts();
+  if (levels[i] && levels[i] !== modelState.effort) pickModel(modelState.model, levels[i]);
+};
+{
+  const slider = $("effort-slider");
+  const stepAt = (x) => {
+    const n = efforts().length;
+    const box = slider.getBoundingClientRect();
+    const pad = 14;
+    return Math.round(Math.min(1, Math.max(0, (x - box.left - pad) / (box.width - 2 * pad))) * (n - 1));
+  };
+  let dragging = false;
+  slider.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    slider.setPointerCapture(e.pointerId);
+    drawSlider(efforts(), stepAt(e.clientX));
+  });
+  slider.addEventListener("pointermove", (e) => {
+    if (dragging) drawSlider(efforts(), stepAt(e.clientX));
+  });
+  slider.addEventListener("pointerup", (e) => {
+    if (!dragging) return;
+    dragging = false;
+    pickEffort(stepAt(e.clientX));
+  });
+  slider.addEventListener("keydown", (e) => {
+    const n = efforts().length;
+    const i = efforts().indexOf(effortInUse());
+    const to = { ArrowLeft: i - 1, ArrowDown: i - 1, ArrowRight: i + 1, ArrowUp: i + 1, Home: 0, End: n - 1 }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    pickEffort(Math.min(n - 1, Math.max(0, to)));
+  });
+}
+$("model-pop").addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  e.stopPropagation();
+  if (!$("model-list").hidden) return showModelList(false);
+  hideModelPop();
+  $("model").focus();
+});
+addEventListener("pointerdown", (e) => {
+  // The path, not contains(): the slider redraws under the pointer first, detaching the target.
+  const path = e.composedPath();
+  if (!$("model-pop").hidden && !path.includes($("model-pop")) && !path.includes($("model"))) hideModelPop();
+});
+
 function setRunning(on, queued = 0) {
   running = on;
-  if (on) hideAgentMenu();
+  if (on && menuOwner === $("agent")) hideAgentMenu();
   renderAgent();
+  renderModel();
   updateSend();
   const q = $("queued");
   q.hidden = queued === 0;
@@ -2556,6 +2735,7 @@ events.onmessage = (ev) => {
     e.log.forEach(addMessage);
     agents = e.agents;
     agentId = e.agent;
+    modelState = { model: e.model, effort: e.effort, models: e.models, defaultModel: e.defaultModel, defaultEffort: e.defaultEffort };
     setRunning(e.running, e.queued);
     if (!desktopReady) {
       desktopReady = true;

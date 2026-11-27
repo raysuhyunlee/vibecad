@@ -10,23 +10,42 @@ export interface Config {
   /** Unset: the app picks the first agent CLI on PATH. */
   agent?: string;
   model?: string;
+  /** The thinking level, as the agent names it. */
+  effort?: string;
 }
 
 const VALID: Record<keyof Config, [(v: unknown) => boolean, string]> = {
   agent: [(v) => typeof v === "string", "a string"],
   model: [(v) => typeof v === "string", "a string"],
+  effort: [(v) => typeof v === "string", "a string"],
 };
 
+const readFile = (): Record<string, unknown> => (existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, "utf8")) : {});
+function writeFile(file: Record<string, unknown>) {
+  mkdirSync(dirname(CONFIG_FILE), { recursive: true });
+  writeFileSync(CONFIG_FILE, JSON.stringify(file, null, 2) + "\n");
+}
+
 /**
- * Saves the agent picked in the app. A model name belongs to one agent, so a change of agent drops it.
+ * Saves the agent picked in the app. A model and an effort belong to one agent, so a change of agent drops them.
  * Other keys stay as the person wrote them.
  */
 export function saveAgent(agent: string) {
-  const file: Record<string, unknown> = existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, "utf8")) : {};
-  if (file.agent !== agent) delete file.model;
+  const file = readFile();
+  if (file.agent !== agent) {
+    delete file.model;
+    delete file.effort;
+  }
   file.agent = agent;
-  mkdirSync(dirname(CONFIG_FILE), { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(file, null, 2) + "\n");
+  writeFile(file);
+}
+
+/** Saves the model and effort picked in the app; undefined drops a key, for the agent's default. */
+export function saveModel(model: string | undefined, effort: string | undefined) {
+  const file = readFile();
+  delete file.model;
+  delete file.effort;
+  writeFile({ ...file, ...(model && { model }), ...(effort && { effort }) });
 }
 
 export function loadConfig(): Config {

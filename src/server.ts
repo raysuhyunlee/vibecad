@@ -5,8 +5,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AGENT_INFO, AGENTS, AgentRunner, cliCommand, installedAgents, INTRO, missingAgent, reloadPath } from "./agent.ts";
-import { saveAgent } from "./config.ts";
+import { AGENT_INFO, AGENTS, AgentRunner, type Catalog, cliCommand, installedAgents, INTRO, missingAgent, reloadPath } from "./agent.ts";
+import { saveAgent, saveModel } from "./config.ts";
 import type { FaceInfo, Model } from "./eval.ts";
 import { buildDir, ensureDir, isFresh } from "./fs.ts";
 import { STEP_FILE } from "./lang.ts";
@@ -173,10 +173,20 @@ export async function serve(o: {
   /** null: no agent CLI is installed. */
   agent: string | null;
   model?: string;
+  effort?: string;
   print: (v: unknown) => void;
 }) {
   // The picker in the chat replaces the runner. A model name belongs to one agent, so a switch drops it, as in the settings.
-  let agent = new AgentRunner(o.agent, o.model);
+  let agent = new AgentRunner(o.agent, o.model, o.effort);
+  // The agent's models, read in the background: claude's takes a moment to start.
+  let catalog: Catalog = { models: [] };
+  const loadCatalog = async () => {
+    const asked = agent;
+    const c = await asked.catalog();
+    if (agent !== asked) return;
+    catalog = c;
+    emit(hello());
+  };
   let installed = installedAgents();
   const agents = () => AGENTS.map((id) => ({ id, ...AGENT_INFO[id]!, installed: installed.includes(id) }));
   const clients = new Set<ServerResponse>();
@@ -217,11 +227,14 @@ export async function serve(o: {
   const hello = () => ({
     type: "hello", root, name: root && basename(root), ...project, ...entryState(), photos: root ? listPhotos() : [],
     log, running: agent.running, queued: queue.length, agent: agent.kind, agents: agents(),
+    model: agent.model ?? null, effort: agent.effort ?? null, models: catalog.models, defaultModel: catalog.defaultModel ?? null, defaultEffort: catalog.defaultEffort ?? null,
   });
   /** Starts talking to another agent: the chat shows that agent's session in this project. */
   const useAgent = (id: string) => {
     if (id === agent.kind) return;
     agent = new AgentRunner(id);
+    catalog = { models: [] };
+    void loadCatalog();
     queue.length = 0;
     log.splice(0, log.length, ...(root ? agent.messages() : []));
   };
@@ -749,6 +762,20 @@ export async function serve(o: {
         emit(hello());
         return json(res, { ok: true });
       }
+      if (path === "/model") {
+        // Takes effect from the next turn, so it is allowed while the agent runs.
+        const b = JSON.parse(await readBody(req));
+        const model = b.model ? String(b.model) : undefined;
+        let effort = b.effort ? String(b.effort) : undefined;
+        const listed = catalog.models.find((m) => m.id === model);
+        // An effort the new model lacks falls back to the default, rather than failing the next turn.
+        if (listed && effort && !listed.efforts.includes(effort)) effort = undefined;
+        saveModel(model, effort);
+        agent.model = model;
+        agent.effort = effort;
+        emit(hello());
+        return json(res, { ok: true });
+      }
       if (path === "/show") {
         const b = JSON.parse(await readBody(req));
         emit({ type: "show", part: String(b.part), ...(b.face && { face: String(b.face) }) });
@@ -771,5 +798,6 @@ export async function serve(o: {
   // A socket file left by a crashed app would block the listen.
   if (process.platform !== "win32") rmSync(o.socket, { force: true });
   server.listen(o.socket, () => o.print({ ok: true, socket: o.socket, agent: o.agent }));
+  void loadCatalog();
   await new Promise(() => {});
 }

@@ -144,6 +144,7 @@
         <div id="queued" hidden></div>
         <textarea id="input" rows="2" placeholder="Pin the model with the pen (D), then describe the change" aria-label="Feedback"></textarea>
         <div id="actions">
+          <button id="model" type="button" class="button pick" aria-haspopup="dialog" aria-expanded="false" title="Model and thinking" hidden><span></span><svg><use href="#i-chevron"/></svg></button>
           <button id="mic" type="button" class="icon" aria-label="Talk (hold Space)" title="Talk (hold Space)"><svg><use href="#i-mic"/></svg></button>
           <button id="send" type="submit" class="icon primary" aria-label="Send" title="Send"><svg><use href="#i-send"/></svg></button>
         </div>
@@ -172,6 +173,20 @@
     <div id="history-error" role="alert" hidden></div>
   </dialog>
   <div id="agent-menu" class="menu" role="menu" hidden></div>
+  <div id="model-pop" role="dialog" tabindex="-1" aria-label="Model and thinking" hidden>
+    <div id="effort-view">
+      <div class="head">
+        <span></span>
+        <div class="titles">
+          <button id="model-list-open" type="button" aria-haspopup="menu"><span></span><svg><use href="#i-chevron"/></svg></button>
+          <div id="effort-name"></div>
+        </div>
+        <button id="effort-reset" type="button" class="icon" aria-label="Default thinking" title="Default thinking"><svg><use href="#i-reset"/></svg></button>
+      </div>
+      <div id="effort-slider" role="slider" tabindex="0" aria-label="Thinking"></div>
+    </div>
+    <div id="model-list" hidden></div>
+  </div>
   <div id="file-menu" role="menu" hidden>
     <button type="button" class="row" role="menuitem" data-format="step">Export STEP</button>
     <button type="button" class="row" role="menuitem" data-format="stl">Export STL</button>

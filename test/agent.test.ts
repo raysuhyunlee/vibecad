@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { installedAgents, mergePath, missingAgent, onPath, pickAgent } from "../src/agent.ts";
+import { AgentRunner, claudeCatalog, codexCatalog, installedAgents, mergePath, missingAgent, onPath, pickAgent } from "../src/agent.ts";
 
 const bin = () => mkdtempSync(join(tmpdir(), "vibecad-path-"));
 
@@ -44,4 +44,45 @@ test("a reloaded PATH only adds folders, so what resolved before still does", ()
   assert.equal(mergePath("/a:/b", "/b/:/c:/a", "darwin"), "/a:/b:/c");
   assert.equal(mergePath("C:\\Tools;C:\\Node", "c:\\node\\;C:\\Users\\홍길동\\AppData\\Roaming\\npm", "win32"), "C:\\Tools;C:\\Node;C:\\Users\\홍길동\\AppData\\Roaming\\npm");
   assert.equal(mergePath("", "/a", "linux"), "/a");
+});
+
+test("the model and thinking level go to each agent's own flags", () => {
+  const args = (kind: string) => new AgentRunner(kind).adapter!.command("s", "m", "high").args.join(" ");
+  assert.match(args("claude"), /--model m --effort high/);
+  assert.match(args("codex"), /-m m -c model_reasoning_effort="high"/);
+  assert.doesNotMatch(new AgentRunner("codex").adapter!.command("s").args.join(" "), /effort|-m /);
+});
+
+test("codex lists its cached models by priority, defaulting to its config, else the first", () => {
+  const dir = bin();
+  const cache = join(dir, "models_cache.json");
+  const config = join(dir, "config.toml");
+  writeFileSync(cache, JSON.stringify({ models: [
+    { slug: "b", display_name: "B 2", visibility: "list", priority: 2, supported_reasoning_levels: [{ effort: "low" }], default_reasoning_level: "low" },
+    { slug: "a", display_name: "A 1", visibility: "list", priority: 1, supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }], default_reasoning_level: "high" },
+    { slug: "hidden", visibility: "hide", priority: 0 },
+  ] }));
+  assert.deepEqual(codexCatalog(cache, config), {
+    models: [
+      { id: "a", name: "A 1", efforts: ["low", "high"], defaultEffort: "high" },
+      { id: "b", name: "B 2", efforts: ["low"], defaultEffort: "low" },
+    ],
+    defaultModel: "a",
+    defaultEffort: undefined,
+  });
+  writeFileSync(config, 'model = "b"\nmodel_reasoning_effort = "low"\n[profiles.x]\nmodel = "a"\n');
+  const c = codexCatalog(cache, config);
+  assert.deepEqual([c.defaultModel, c.defaultEffort], ["b", "low"]);
+  assert.deepEqual(codexCatalog(join(dir, "none.json"), config).models, []);
+});
+
+test("claude's default names the alias it resolves to, with its version", () => {
+  const c = claudeCatalog({ models: [
+    { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)" },
+    { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus 5.5", supportedEffortLevels: ["low", "max"] },
+    { value: "claude-opus-5-5", resolvedModel: "claude-opus-5-5", displayName: "Opus 5.5" },
+  ] }, { effortLevel: "medium" });
+  assert.deepEqual(c.models.map((m) => [m.id, m.name]), [["opus", "Opus 5.5"], ["claude-opus-5-5", "Opus 5.5"]]);
+  assert.deepEqual([c.defaultModel, c.defaultEffort], ["opus", "medium"]);
+  assert.deepEqual(claudeCatalog({}, null), { models: [], defaultModel: undefined, defaultEffort: undefined });
 });

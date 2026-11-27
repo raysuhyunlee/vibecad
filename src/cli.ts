@@ -394,9 +394,9 @@ async function main() {
     const agent = pickAgent(config.agent, installed);
     // An agent found in place of none, or of a missing one, goes in the settings, which then show what runs.
     if (agent && agent !== config.agent) saveAgent(agent);
-    // A model name belongs to the configured agent, and saving another drops it.
-    const model = agent === config.agent ? config.model : undefined;
-    return serve({ agent, model, socket: o.socket, print });
+    // A model and an effort belong to the configured agent, and saving another drops them.
+    const same = agent === config.agent;
+    return serve({ agent, model: same ? config.model : undefined, effort: same ? config.effort : undefined, socket: o.socket, print });
   }
   if (cmd === "show") return show(o.part, o.face, o.message);
 

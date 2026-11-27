@@ -376,6 +376,12 @@ test("the app picks an installed agent, and the picker switches and saves it", {
     assert.equal((await ask("/agent", { id: "claude" })).status, 200);
     assert.equal((await hello()).agent, "claude");
     assert.deepEqual(JSON.parse(readFileSync(join(child.home, ".vibecad/config.json"), "utf8")), { agent: "claude" });
+    assert.equal((await ask("/model", { model: "opus", effort: "max" })).status, 200);
+    const picked = await hello();
+    assert.deepEqual([picked.model, picked.effort], ["opus", "max"]);
+    assert.deepEqual(JSON.parse(readFileSync(join(child.home, ".vibecad/config.json"), "utf8")), { agent: "claude", model: "opus", effort: "max" });
+    await ask("/model", { model: "opus" });
+    assert.deepEqual(JSON.parse(readFileSync(join(child.home, ".vibecad/config.json"), "utf8")), { agent: "claude", model: "opus" }, "default drops the key");
   } finally {
     child.kill();
     await new Promise((ok) => child.on("close", ok));

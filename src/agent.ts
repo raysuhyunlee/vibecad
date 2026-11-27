@@ -39,7 +39,8 @@ interface History {
 interface Adapter {
   history?: History;
   /** The prompt always goes through stdin, so no shell ever parses it. */
-  command(session: string | undefined, model?: string): { cmd: string; args: string[]; newSession?: string };
+  command(session: string | undefined, model?: string, effort?: string): { cmd: string; args: string[]; newSession?: string };
+  catalog(): Promise<Catalog>;
   parse(event: any): { session?: string; events: AgentEvent[] };
 }
 
@@ -120,9 +121,109 @@ const claudeHistory: History = {
   },
 };
 
+export interface AgentModel {
+  /** What the agent's model flag takes. */
+  id: string;
+  /** With its version, as the agent names it. */
+  name: string;
+  efforts: string[];
+  defaultEffort?: string;
+}
+/** What the agent offers, and what it uses when vibecad names nothing. */
+export interface Catalog {
+  models: AgentModel[];
+  defaultModel?: string;
+  defaultEffort?: string;
+}
+
+const readJson = (file: string): any => {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return undefined;
+  }
+};
+const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+
+/**
+ * Claude's catalog from its initialize response, which lists each model with its version and levels,
+ * and resolves the default; the default level comes from its settings.
+ */
+export function claudeCatalog(response: any, settings: any = readJson(join(homedir(), ".claude", "settings.json"))): Catalog {
+  const all: any[] = Array.isArray(response?.models) ? response.models : [];
+  const models = all
+    .filter((m) => typeof m.value === "string" && m.value !== "default")
+    .map((m) => ({ id: m.value, name: String(m.displayName ?? m.value), efforts: Array.isArray(m.supportedEffortLevels) ? m.supportedEffortLevels : [] }));
+  // Aliases come first, so the default names the alias that resolves to it.
+  const resolved = all.find((m) => m.value === "default")?.resolvedModel;
+  const defaultModel = all.find((m) => m.value !== "default" && m.resolvedModel === resolved)?.value;
+  return { models, defaultModel, defaultEffort: str(settings?.effortLevel) };
+}
+
+/** Asks the claude CLI for its catalog without starting a turn: it answers initialize before any request. */
+function fetchClaudeCatalog(): Promise<Catalog> {
+  return new Promise((done) => {
+    const fallback = () => claudeCatalog({});
+    const child = spawn("claude", ["-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--strict-mcp-config", "--no-session-persistence"], {
+      shell: process.platform === "win32",
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    let finished = false;
+    const finish = (c: Catalog) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      child.kill();
+      done(c);
+    };
+    const timer = setTimeout(() => finish(fallback()), 10000);
+    child.on("error", () => finish(fallback()));
+    child.on("close", () => finish(fallback()));
+    child.stdin!.on("error", () => {});
+    child.stdin!.write(JSON.stringify({ type: "control_request", request_id: "catalog", request: { subtype: "initialize" } }) + "\n");
+    createInterface({ input: child.stdout! }).on("line", (line) => {
+      try {
+        const e = JSON.parse(line);
+        if (e.type === "control_response") finish(claudeCatalog(e.response?.response ?? e.response));
+      } catch {}
+    });
+  });
+}
+
+/** The top-level keys of codex's config.toml, before any table. */
+function codexConfig(file: string) {
+  const out: Record<string, string> = {};
+  try {
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (/^\s*\[/.test(line)) break;
+      const m = /^\s*(\w+)\s*=\s*"([^"]*)"/.exec(line);
+      if (m) out[m[1]!] = m[2]!;
+    }
+  } catch {}
+  return out;
+}
+
+/**
+ * The models codex lists for the person's account, from the catalog it caches. Its default is the model
+ * in its config, else the first by priority; the default level is the config's, else the model's.
+ */
+export function codexCatalog(cache = join(homedir(), ".codex", "models_cache.json"), config = join(homedir(), ".codex", "config.toml")): Catalog {
+  const listed: any[] = (readJson(cache)?.models ?? []).filter((m: any) => m.visibility === "list" && typeof m.slug === "string");
+  listed.sort((a, b) => (a.priority ?? Infinity) - (b.priority ?? Infinity));
+  const models = listed.map((m) => ({
+    id: m.slug,
+    name: String(m.display_name ?? m.slug),
+    efforts: (m.supported_reasoning_levels ?? []).map((l: any) => l.effort).filter((e: unknown) => typeof e === "string"),
+    defaultEffort: str(m.default_reasoning_level),
+  }));
+  const c = codexConfig(config);
+  return { models, defaultModel: c.model ?? models[0]?.id, defaultEffort: c.model_reasoning_effort };
+}
+
 const claude: Adapter = {
   history: claudeHistory,
-  command(session, model) {
+  catalog: fetchClaudeCatalog,
+  command(session, model, effort) {
     const newSession = session ? undefined : randomUUID();
     return {
       cmd: "claude",
@@ -135,6 +236,7 @@ const claude: Adapter = {
         "--strict-mcp-config",
         ...(session ? ["--resume", session] : ["--session-id", newSession!]),
         ...(model ? ["--model", model] : []),
+        ...(effort ? ["--effort", effort] : []),
       ],
       ...(newSession && { newSession }),
     };
@@ -154,13 +256,15 @@ const claude: Adapter = {
 };
 
 const codex: Adapter = {
-  command(session, model) {
+  catalog: async () => codexCatalog(),
+  command(session, model, effort) {
     const options = [
       "--json",
       // A project need not be a git repo or one the person has trusted in codex.
       "--skip-git-repo-check",
       "-c", 'sandbox_mode="workspace-write"',
       ...(model ? ["-m", model] : []),
+      ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
     ];
     return {
       cmd: "codex",
@@ -299,15 +403,18 @@ function branch() {
 export class AgentRunner {
   /** null: no agent CLI is installed, so every turn fails with how to install one. */
   readonly kind: string | null;
-  readonly model: string | undefined;
+  /** Unset: the agent's own default. Changes take effect from the next turn. */
+  model: string | undefined;
+  effort: string | undefined;
   readonly adapter: Adapter | undefined;
   child: ChildProcess | undefined;
 
-  constructor(kind: string | null, model?: string) {
+  constructor(kind: string | null, model?: string, effort?: string) {
     const adapter = kind === null ? undefined : ADAPTERS[kind];
     if (kind !== null && !adapter) throw new Error(`Unknown agent "${kind}". Use: ${Object.keys(ADAPTERS).join(", ")}`);
     this.kind = kind;
     this.model = model;
+    this.effort = effort;
     this.adapter = adapter;
   }
 
@@ -340,6 +447,9 @@ export class AgentRunner {
   useSession(id: string) {
     this.saveSession(id);
   }
+  catalog(): Promise<Catalog> {
+    return this.adapter?.catalog() ?? Promise.resolve({ models: [] });
+  }
   pastSessions() {
     return this.adapter?.history?.list() ?? [];
   }
@@ -356,7 +466,7 @@ export class AgentRunner {
     }
     const adapter = this.adapter;
     const session = this.session();
-    const { cmd, args, newSession } = adapter.command(session, this.model);
+    const { cmd, args, newSession } = adapter.command(session, this.model, this.effort);
     // Checked first: on Windows a missing command only shows as cmd.exe's own message, in its local code page.
     if (!onPath(cmd)) {
       onEvent({ kind: "error", text: missingAgent(cmd) });
