@@ -4,7 +4,7 @@ import { request } from "node:http";
 import { Readable } from "node:stream";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { after, test } from "node:test";
 
 const CLI = new URL("../src/cli.ts", import.meta.url).pathname;
@@ -52,12 +52,16 @@ function startApp(config: unknown, name = "main", path = process.env.PATH, shell
   child.on("close", () => rmSync(home, { recursive: true, force: true }));
   return Object.assign(child, { home });
 }
-const app = startApp({});
+// A stand-in claude on PATH, so the app picks claude and reads its sessions where none is installed.
+const fakeBin = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-bin-")));
+writeFileSync(join(fakeBin, "claude"), "#!/bin/sh\n", { mode: 0o755 });
+const app = startApp({}, "main", `${fakeBin}${delimiter}${process.env.PATH}`);
 await new Promise((ok) => app.stdout.once("data", ok));
 after(() => {
   app.kill();
   rmSync(root, { recursive: true, force: true });
   rmSync(bare, { recursive: true, force: true });
+  rmSync(fakeBin, { recursive: true, force: true });
 });
 
 const post = (path: string, body: unknown) => fetch(URL_BASE + path, { method: "POST", body: JSON.stringify(body) });

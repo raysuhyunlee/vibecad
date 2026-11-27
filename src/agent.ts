@@ -199,7 +199,8 @@ export function onPath(cmd: string, env: NodeJS.ProcessEnv = process.env, platfo
   return dirs.some((dir) =>
     exts.some((ext) => {
       try {
-        const file = join(dir, cmd + ext);
+        // Windows names are case-blind, and npm writes its shims in lower case.
+        const file = join(dir, cmd + ext.toLowerCase());
         if (!statSync(file).isFile()) return false;
         if (!win) accessSync(file, constants.X_OK);
         return true;
