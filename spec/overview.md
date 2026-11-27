@@ -137,7 +137,9 @@
 ## settings
 
 - `~/.vibecad/config.json`, per user because the app starts before any project opens; read when the app starts
-- `agent` (`claude`), `model` (agent default)
+- `agent` (unset), `model` (agent default)
+- at start, when `agent` is unset or not on PATH, the app writes the first of `claude`, `codex` on PATH to the file, dropping `model`; with none on PATH there is no agent, the file is left as it is, and a turn says how to install one
+- the chat's agent picker writes `agent`, keeping the other keys; a change of agent drops `model`, which names one agent's model
 - every key is optional; an unknown key or a bad value stops the app with an error
 
 ## app and projects
@@ -250,6 +252,9 @@
 ## agent sessions
 
 - the preview starts one agent turn per message, prompt through stdin
+- the chat header names the agent in use and opens a menu of all agents, the ones not on PATH greyed with their install command as a tooltip, so a person sees what else they can use; switching is refused while the agent runs, and shows that agent's current session in the project
+- with no agent on PATH the chat shows each agent's install command and `Check again`, which looks again without a restart and saves the agent it finds; it first adds to the app's PATH the folders of a fresh one, from the registry on Windows (installers change it without reaching running apps) and from the login shell elsewhere, never removing or reordering what is there; when that PATH cannot be read it logs the cause and asks for a restart
+- each turn first looks for the agent's CLI on PATH (with PATHEXT on Windows); a missing one is an error naming what to install, or the installed agent to set, never the shell's own message
 - the first prompt points the agent at `AGENTS.md` and `docs/tutorial.md`
 - vibecad owns its sessions and never touches the person's open terminal sessions
 - one session per agent per git branch, in gitignored `.vibecad/sessions.json`

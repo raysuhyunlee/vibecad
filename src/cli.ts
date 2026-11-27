@@ -387,8 +387,16 @@ async function main() {
     if (!o.socket) throw new CadError("MISSING_SOCKET", "dev needs --socket", undefined, "Run the desktop app with npm run app");
     const { loadConfig } = await import("./config.ts");
     const { serve } = await import("./server.ts");
+    const { installedAgents, pickAgent } = await import("./agent.ts");
+    const { saveAgent } = await import("./config.ts");
     const config = loadConfig();
-    return serve({ ...config, socket: o.socket, print });
+    const installed = installedAgents();
+    const agent = pickAgent(config.agent, installed);
+    // An agent found in place of none, or of a missing one, goes in the settings, which then show what runs.
+    if (agent && agent !== config.agent) saveAgent(agent);
+    // A model name belongs to the configured agent, and saving another drops it.
+    const model = agent === config.agent ? config.model : undefined;
+    return serve({ agent, model, socket: o.socket, print });
   }
   if (cmd === "show") return show(o.part, o.face, o.message);
 

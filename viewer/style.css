@@ -102,7 +102,7 @@ button { font: inherit; color: inherit; }
   min-width: 0;
 }
 .row:hover { background: var(--hover); }
-#file-menu {
+#file-menu, #agent-menu {
   position: fixed;
   z-index: 10;
   min-width: 140px;
@@ -112,7 +112,7 @@ button { font: inherit; color: inherit; }
   background: var(--panel);
   box-shadow: 0 4px 16px rgb(0 0 0 / .18);
 }
-#file-menu .row:disabled { opacity: .4; cursor: default; }
+#file-menu .row:disabled, #agent-menu .row:disabled { opacity: .4; cursor: default; }
 .row[aria-current="true"] { background: var(--accent); color: var(--accent-text); }
 .row[aria-current="true"] .row.place { align-items: center; gap: var(--s1); }
 .row.place svg { width: 12px; height: 12px; flex: none; color: var(--muted); }
@@ -372,7 +372,16 @@ button { font: inherit; color: inherit; }
 .measure-row span { color: var(--muted); }
 .measure-row b { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-#chat header { display: flex; justify-content: flex-end; gap: var(--s1); padding: var(--s2); }
+#chat header { display: flex; align-items: center; gap: var(--s1); padding: var(--s2); }
+#agent { background: transparent; padding: 0 var(--s2); gap: var(--s1); }
+#agent:not(:disabled):hover { background: var(--hover); }
+#agent svg { width: 12px; height: 12px; color: var(--muted); transform: rotate(90deg); }
+#agent-menu { min-width: 200px; }
+#no-agent { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2); padding: 0 var(--s3) var(--s3); }
+#no-agent p { margin: 0; }
+#no-agent-list { display: flex; flex-direction: column; gap: var(--s1); width: 100%; }
+#no-agent-list .name { font-weight: 600; }
+#no-agent-list code { display: block; font: var(--font-sm)/1.4 var(--mono); color: var(--muted); overflow-wrap: anywhere; user-select: text; }
 #log { flex: 1; overflow-y: auto; padding: 0 var(--s3) var(--s3); display: flex; flex-direction: column; gap: var(--s2); min-height: 0; }
 .msg { flex: none; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.user { align-self: flex-end; max-width: 90%; padding: var(--s1) var(--s3); border-radius: 12px; background: var(--hover); }
@@ -459,3 +468,6 @@ button { font: inherit; color: inherit; }
 @media (max-width: 900px) {
   #app { grid-template-columns: 200px minmax(0, 1fr) 260px; }
 }
+#agent-menu .row[aria-disabled="true"] { opacity: .4; cursor: default; }
+#agent-menu .row[aria-disabled="true"]:hover { background: transparent; }
+#no-agent-error { color: var(--danger); font-size: var(--font-sm); }

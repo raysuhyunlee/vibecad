@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { request } from "node:http";
 import { Readable } from "node:stream";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -34,14 +34,19 @@ function fetch(url: string, init: { method?: string; body?: string } = {}): Prom
   });
 }
 
-/** Starts the app on socket `name`, with its own home folder, and so its own config file. */
-function startApp(config: unknown, name = "main") {
+/**
+ * Starts the app on socket `name`, with its own home folder, and so its own config file.
+ * Its login shell is a stand-in that prints `shellPath`, which Check again reads; null makes it fail.
+ */
+function startApp(config: unknown, name = "main", path = process.env.PATH, shellPath: string | null = path ?? "") {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-home-")));
   mkdirSync(join(home, ".vibecad"));
   writeFileSync(join(home, ".vibecad/config.json"), JSON.stringify(config));
+  const shell = join(home, "shell");
+  writeFileSync(shell, shellPath === null ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\necho "startup noise"\nprintf %s '${shellPath}'\n`, { mode: 0o755 });
   const child = spawn(process.execPath, [CLI, "dev", "--socket", sock(name)], {
     cwd: bare,
-    env: { ...process.env, HOME: home, USERPROFILE: home },
+    env: { ...process.env, HOME: home, USERPROFILE: home, PATH: path, SHELL: shell },
     stdio: ["ignore", "pipe", "ignore"],
   });
   child.on("close", () => rmSync(home, { recursive: true, force: true }));
@@ -330,6 +335,107 @@ test("a bad setting stops the app and names the file", async () => {
     assert.equal(error.code, "BAD_CONFIG");
     assert.match(error.message, new RegExp(text));
     assert.match(error.message, /config\.json/);
+  }
+});
+
+test("the app picks an installed agent, and the picker switches and saves it", { skip: process.platform === "win32" }, async () => {
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-bin-")));
+  const fake = (name: string) => writeFileSync(join(bin, name), "#!/bin/sh\n", { mode: 0o755 });
+  fake("codex");
+  const host = "agents";
+  const ask = (path: string, body: unknown) => fetch(`http://${host}${path}`, { method: "POST", body: JSON.stringify(body) });
+  const hello = async () => {
+    const res = await fetch(`http://${host}/events`);
+    const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+    let text = "";
+    while (!text.includes("\n\n")) text += (await reader.read()).value;
+    await reader.cancel();
+    return JSON.parse(text.slice(6, text.indexOf("\n\n")));
+  };
+  let child = startApp({}, host, bin);
+  await new Promise((ok) => child.stdout.once("data", ok));
+  try {
+    const h = await hello();
+    assert.equal(h.agent, "codex", "only codex is on PATH");
+    assert.deepEqual(JSON.parse(readFileSync(join(child.home, ".vibecad/config.json"), "utf8")), { agent: "codex" }, "the found agent is saved");
+    assert.deepEqual(h.agents.map((a: any) => [a.id, a.installed]), [["claude", false], ["codex", true]]);
+    const missing = await ask("/agent", { id: "claude" });
+    assert.equal(missing.status, 400);
+    assert.match((await missing.json()).error, /Could not find claude/);
+    assert.equal((await ask("/agent", { id: "gpt" })).status, 400);
+
+    fake("claude");
+    const found = await ask("/agents", {});
+    assert.equal(found.status, 200);
+    assert.deepEqual((await found.json()).installed, ["claude", "codex"]);
+    assert.equal((await hello()).agents[0].installed, true, "checking again finds a new install");
+    assert.equal((await ask("/agent", { id: "claude" })).status, 200);
+    assert.equal((await hello()).agent, "claude");
+    assert.deepEqual(JSON.parse(readFileSync(join(child.home, ".vibecad/config.json"), "utf8")), { agent: "claude" });
+  } finally {
+    child.kill();
+    await new Promise((ok) => child.on("close", ok));
+  }
+  // A configured agent that is missing gives way to an installed one, which is saved without the old model.
+  rmSync(join(bin, "claude"));
+  child = startApp({ agent: "claude", model: "opus" }, host, bin);
+  await new Promise((ok) => child.stdout.once("data", ok));
+  try {
+    assert.equal((await hello()).agent, "codex");
+    assert.deepEqual(JSON.parse(readFileSync(join(child.home, ".vibecad/config.json"), "utf8")), { agent: "codex" });
+  } finally {
+    child.kill();
+    await new Promise((ok) => child.on("close", ok));
+  }
+  // With none installed there is no agent, a turn says how to install one, and the file is left as it is.
+  child = startApp({}, host, join(bin, "empty"));
+  await new Promise((ok) => child.stdout.once("data", ok));
+  try {
+    assert.equal((await hello()).agent, null);
+    assert.deepEqual(JSON.parse(readFileSync(join(child.home, ".vibecad/config.json"), "utf8")), {});
+  } finally {
+    child.kill();
+    await new Promise((ok) => child.on("close", ok));
+  }
+  // Check again reads the login shell's PATH, finding an agent installed into a folder new to it.
+  const later = realpathSync(mkdtempSync(join(tmpdir(), "vibecad-bin-")));
+  writeFileSync(join(later, "claude"), "#!/bin/sh\n", { mode: 0o755 });
+  child = startApp({}, host, join(bin, "empty"), `${join(bin, "empty")}:${later}`);
+  await new Promise((ok) => child.stdout.once("data", ok));
+  try {
+    assert.equal((await hello()).agent, null);
+    const res = await ask("/agents", {});
+    assert.deepEqual((await res.json()).installed, ["claude"]);
+    assert.equal((await hello()).agent, "claude");
+    assert.deepEqual(JSON.parse(readFileSync(join(child.home, ".vibecad/config.json"), "utf8")), { agent: "claude" });
+  } finally {
+    child.kill();
+    await new Promise((ok) => child.on("close", ok));
+    rmSync(later, { recursive: true, force: true });
+  }
+  // A PATH that cannot be read asks for a restart.
+  child = startApp({}, host, join(bin, "empty"), null);
+  await new Promise((ok) => child.stdout.once("data", ok));
+  try {
+    const res = await ask("/agents", {});
+    assert.equal(res.status, 500);
+    assert.match((await res.json()).error, /Could not reload PATH.*Restart Vibecad/);
+  } finally {
+    child.kill();
+    await new Promise((ok) => child.on("close", ok));
+  }
+  fake("claude");
+  // A saved agent drops a model that belonged to another one.
+  child = startApp({ agent: "codex", model: "o3" }, host, bin);
+  await new Promise((ok) => child.stdout.once("data", ok));
+  try {
+    assert.equal((await hello()).agent, "codex");
+    assert.equal((await ask("/agent", { id: "claude" })).status, 200);
+    assert.deepEqual(JSON.parse(readFileSync(join(child.home, ".vibecad/config.json"), "utf8")), { agent: "claude" });
+  } finally {
+    child.kill();
+    await new Promise((ok) => child.on("close", ok));
+    rmSync(bin, { recursive: true, force: true });
   }
 });
 

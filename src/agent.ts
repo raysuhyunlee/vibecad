@@ -1,8 +1,9 @@
 // Runs the user's own coding agent, one turn per message, in a session vibecad owns.
 // Sessions never touch the user's open terminal sessions.
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -181,6 +182,89 @@ const codex: Adapter = {
 };
 
 const ADAPTERS: Record<string, Adapter> = { claude, codex };
+/** In the order vibecad picks one when the settings name none. */
+export const AGENTS = Object.keys(ADAPTERS);
+/** How the app names each agent, and how to install it. */
+export const AGENT_INFO: Record<string, { name: string; install: string }> = {
+  claude: { name: "Claude", install: "npm install -g @anthropic-ai/claude-code" },
+  codex: { name: "Codex", install: "npm install -g @openai/codex" },
+};
+const INSTALL: Record<string, string> = { claude: "Claude Code (claude)", codex: "Codex CLI (codex)" };
+
+/** Whether a command is on PATH, found the way a shell would. */
+export function onPath(cmd: string, env: NodeJS.ProcessEnv = process.env, platform = process.platform) {
+  const win = platform === "win32";
+  const dirs = (env.PATH ?? env.Path ?? "").split(win ? ";" : ":").filter(Boolean);
+  const exts = win ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean) : [""];
+  return dirs.some((dir) =>
+    exts.some((ext) => {
+      try {
+        const file = join(dir, cmd + ext);
+        if (!statSync(file).isFile()) return false;
+        if (!win) accessSync(file, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }),
+  );
+}
+
+/** `current` with the folders of `fresh` it lacks added at the end, so what resolved before still does. */
+export function mergePath(current: string, fresh: string, platform = process.platform) {
+  const sep = platform === "win32" ? ";" : ":";
+  const key = (d: string) => (platform === "win32" ? d.toLowerCase().replace(/\\+$/, "") : d.replace(/\/+$/, ""));
+  const dirs = current.split(sep).filter(Boolean);
+  const seen = new Set(dirs.map(key));
+  for (const d of fresh.split(sep).map((s) => s.trim()).filter(Boolean)) {
+    if (seen.has(key(d))) continue;
+    seen.add(key(d));
+    dirs.push(d);
+  }
+  return dirs.join(sep);
+}
+
+/**
+ * The PATH a newly started app would get: the registry's on Windows, which installers change without
+ * reaching running processes; the login shell's elsewhere. Throws when it cannot be read.
+ */
+export async function freshPath(platform = process.platform): Promise<string> {
+  const run = promisify(execFile);
+  if (platform === "win32") {
+    // UTF-8, or a non-ASCII user folder arrives in the console's code page and no longer matches.
+    const ps = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
+      "[Environment]::ExpandEnvironmentVariables([Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User'))";
+    const { stdout } = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", timeout: 10000, windowsHide: true });
+    if (!stdout.trim()) throw new Error("the registry gave no PATH");
+    return stdout.trim();
+  }
+  const shell = process.env.SHELL || "/bin/zsh";
+  const { stdout } = await run(shell, ["-ilc", 'printf %s "$PATH"'], { encoding: "utf8", timeout: 10000 });
+  // Startup files may print first; the PATH is the last line.
+  const path = stdout.trim().split("\n").pop();
+  if (!path) throw new Error(`${shell} gave no PATH`);
+  return path;
+}
+
+/** Adds the folders of a fresh PATH to this process's, which the agents inherit. */
+export async function reloadPath() {
+  process.env.PATH = mergePath(process.env.PATH ?? "", await freshPath());
+}
+
+/** The agent CLIs on PATH. */
+export const installedAgents = (env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform) => AGENTS.filter((a) => onPath(a, env, platform));
+
+/** The configured agent while it is installed, or else the first one installed; null when none is. */
+export const pickAgent = (configured: string | undefined, installed = installedAgents()): string | null =>
+  configured && installed.includes(configured) ? configured : installed[0] ?? null;
+
+/** What to tell the person when an agent's CLI is not on PATH. */
+export function missingAgent(kind: string | null, installed = installedAgents()) {
+  if (!kind || installed.length === 0) {
+    return `No agent CLI found on PATH. Install and log in to ${AGENTS.map((a) => INSTALL[a]).join(" or ")}, then check again in the chat.`;
+  }
+  return `Could not find ${kind} on PATH. Install and log in to it, then restart Vibecad. Or set "agent": "${installed[0]}" in ~/.vibecad/config.json.`;
+}
 
 function branch() {
   try {
@@ -191,14 +275,15 @@ function branch() {
 }
 
 export class AgentRunner {
-  readonly kind: string;
+  /** null: no agent CLI is installed, so every turn fails with how to install one. */
+  readonly kind: string | null;
   readonly model: string | undefined;
-  readonly adapter: Adapter;
+  readonly adapter: Adapter | undefined;
   child: ChildProcess | undefined;
 
-  constructor(kind: string, model?: string) {
-    const adapter = ADAPTERS[kind];
-    if (!adapter) throw new Error(`Unknown agent "${kind}". Use: ${Object.keys(ADAPTERS).join(", ")}`);
+  constructor(kind: string | null, model?: string) {
+    const adapter = kind === null ? undefined : ADAPTERS[kind];
+    if (kind !== null && !adapter) throw new Error(`Unknown agent "${kind}". Use: ${Object.keys(ADAPTERS).join(", ")}`);
     this.kind = kind;
     this.model = model;
     this.adapter = adapter;
@@ -216,14 +301,15 @@ export class AgentRunner {
     return existsSync(SESSIONS_FILE) ? JSON.parse(readFileSync(SESSIONS_FILE, "utf8")) : {};
   }
   private saveSession(id: string | undefined) {
+    if (!this.kind) return;
     const all = this.sessions();
     if (id) all[this.key()] = id;
     else delete all[this.key()];
     ensureDir(".vibecad");
     writeFileSync(SESSIONS_FILE, JSON.stringify(all, null, 2));
   }
-  session() {
-    return this.sessions()[this.key()];
+  session(): string | undefined {
+    return this.kind ? this.sessions()[this.key()] : undefined;
   }
   newSession() {
     this.saveSession(undefined);
@@ -233,23 +319,34 @@ export class AgentRunner {
     this.saveSession(id);
   }
   pastSessions() {
-    return this.adapter.history?.list() ?? [];
+    return this.adapter?.history?.list() ?? [];
   }
   /** The current session's conversation, or a past one's. */
   messages(id = this.session()) {
-    return id && this.adapter.history ? this.adapter.history.load(id) : [];
+    return id && this.adapter?.history ? this.adapter.history.load(id) : [];
   }
 
   /** Runs one turn. Resolves when the agent exits. */
   run(prompt: string, onEvent: (e: AgentEvent) => void): Promise<void> {
+    if (!this.adapter) {
+      onEvent({ kind: "error", text: missingAgent(null) });
+      return Promise.resolve();
+    }
+    const adapter = this.adapter;
     const session = this.session();
-    const { cmd, args, newSession } = this.adapter.command(session, this.model);
+    const { cmd, args, newSession } = adapter.command(session, this.model);
+    // Checked first: on Windows a missing command only shows as cmd.exe's own message, in its local code page.
+    if (!onPath(cmd)) {
+      onEvent({ kind: "error", text: missingAgent(cmd) });
+      return Promise.resolve();
+    }
     return new Promise((done) => {
       // Windows launches npm-installed CLIs through .cmd shims, which need a shell.
       // Arguments here are fixed flags and ids. The prompt goes through stdin.
       const child = spawn(cmd, args, { shell: process.platform === "win32", stdio: ["pipe", "pipe", "pipe"] });
       this.child = child;
-      let stderr = "";
+      // Kept as bytes and decoded once, so a character split across chunks stays whole.
+      let stderr = Buffer.alloc(0);
       let stopped = false;
       let reported = false;
       const report = (e: AgentEvent) => {
@@ -259,7 +356,7 @@ export class AgentRunner {
         }
         onEvent(e);
       };
-      child.stderr!.on("data", (d) => (stderr = (stderr + d).slice(-2000)));
+      child.stderr!.on("data", (d: Buffer) => (stderr = Buffer.concat([stderr, d]).subarray(-8000)));
       child.stdin!.on("error", () => {});
       child.stdin!.end(prompt);
       createInterface({ input: child.stdout! }).on("line", (line) => {
@@ -269,7 +366,7 @@ export class AgentRunner {
         } catch {
           return;
         }
-        const r = this.adapter.parse(event);
+        const r = adapter.parse(event);
         if (r.session && r.session !== session) this.saveSession(r.session);
         r.events.forEach(report);
       });
@@ -281,7 +378,7 @@ export class AgentRunner {
         this.child = undefined;
         if (code === 0 && newSession) this.saveSession(newSession);
         if (code !== 0 && code !== null && !stopped) {
-          report({ kind: "error", text: stderr.trim() || `${cmd} exited with code ${code}.` });
+          report({ kind: "error", text: stderr.toString("utf8").trim().slice(-2000) || `${cmd} exited with code ${code}.` });
         }
         done();
       });

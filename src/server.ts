@@ -5,7 +5,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AgentRunner, cliCommand, INTRO } from "./agent.ts";
+import { AGENT_INFO, AGENTS, AgentRunner, cliCommand, installedAgents, INTRO, missingAgent, reloadPath } from "./agent.ts";
+import { saveAgent } from "./config.ts";
 import type { FaceInfo, Model } from "./eval.ts";
 import { buildDir, ensureDir, isFresh } from "./fs.ts";
 import { STEP_FILE } from "./lang.ts";
@@ -169,11 +170,15 @@ function listFiles() {
 export async function serve(o: {
   /** The desktop app's local socket: only the app reaches it, and no port can clash. */
   socket: string;
-  agent: string;
+  /** null: no agent CLI is installed. */
+  agent: string | null;
   model?: string;
   print: (v: unknown) => void;
 }) {
-  const agent = new AgentRunner(o.agent, o.model);
+  // The picker in the chat replaces the runner. A model name belongs to one agent, so a switch drops it, as in the settings.
+  let agent = new AgentRunner(o.agent, o.model);
+  let installed = installedAgents();
+  const agents = () => AGENTS.map((id) => ({ id, ...AGENT_INFO[id]!, installed: installed.includes(id) }));
   const clients = new Set<ServerResponse>();
   const log: unknown[] = [];
   const queue: Feedback[] = [];
@@ -211,8 +216,15 @@ export async function serve(o: {
   };
   const hello = () => ({
     type: "hello", root, name: root && basename(root), ...project, ...entryState(), photos: root ? listPhotos() : [],
-    log, running: agent.running, queued: queue.length, agent: o.agent,
+    log, running: agent.running, queued: queue.length, agent: agent.kind, agents: agents(),
   });
+  /** Starts talking to another agent: the chat shows that agent's session in this project. */
+  const useAgent = (id: string) => {
+    if (id === agent.kind) return;
+    agent = new AgentRunner(id);
+    queue.length = 0;
+    log.splice(0, log.length, ...(root ? agent.messages() : []));
+  };
 
   // --- Builds ---------------------------------------------------------------
   /** The file's build on disk. Throws when there is none. */
@@ -705,6 +717,35 @@ export async function serve(o: {
         agent.useSession(id);
         queue.length = 0;
         log.splice(0, log.length, ...agent.messages(id));
+        emit(hello());
+        return json(res, { ok: true });
+      }
+      if (path === "/agents") {
+        // Looks again, for an agent installed since the app started, perhaps into a folder new to PATH.
+        try {
+          await reloadPath();
+        } catch (e) {
+          // The cause is for the log; the person's next step is the same whatever it was.
+          console.error("could not reload PATH:", e instanceof Error ? e.message : e);
+          return json(res, { error: "Could not reload PATH. Restart Vibecad to find a newly installed agent." }, 500);
+        }
+        installed = installedAgents();
+        // The one found then is saved, as at start.
+        if (!agent.running && !installed.includes(agent.kind!) && installed[0]) {
+          saveAgent(installed[0]);
+          useAgent(installed[0]);
+        }
+        emit(hello());
+        return json(res, { ok: true, installed });
+      }
+      if (path === "/agent") {
+        if (agent.running) return json(res, { error: "Stop the agent before switching to another." }, 409);
+        const id = String(JSON.parse(await readBody(req)).id);
+        if (!AGENTS.includes(id)) return json(res, { error: `Unknown agent "${id}".` }, 400);
+        installed = installedAgents();
+        if (!installed.includes(id)) return json(res, { error: missingAgent(id, installed) }, 400);
+        saveAgent(id);
+        useAgent(id);
         emit(hello());
         return json(res, { ok: true });
       }

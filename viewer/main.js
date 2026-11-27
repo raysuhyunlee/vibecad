@@ -2208,8 +2208,89 @@ $("history").addEventListener("click", (e) => {
   if (e.target === $("history")) $("history").close();
 });
 
+// --- Agent picker: the agents on PATH, the one in use first -----------------------
+let agents = [];
+let agentId = null;
+function renderAgent() {
+  const found = agents.filter((a) => a.installed);
+  const current = agents.find((a) => a.id === agentId);
+  const btn = $("agent");
+  btn.hidden = !found.length;
+  $("agent-name").textContent = current?.name ?? "";
+  btn.setAttribute("aria-label", `Agent: ${current?.name ?? ""}`);
+  btn.title = running ? "Stop the agent to switch" : "Switch agent";
+  btn.disabled = running;
+  $("no-agent").hidden = !!found.length;
+  $("no-agent-list").replaceChildren(...agents.map((a) => {
+    const item = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = a.name;
+    const code = document.createElement("code");
+    code.textContent = a.install;
+    item.append(name, code);
+    return item;
+  }));
+}
+function hideAgentMenu() {
+  $("agent-menu").hidden = true;
+  $("agent").setAttribute("aria-expanded", "false");
+}
+$("agent").onclick = () => {
+  if (!$("agent-menu").hidden) return hideAgentMenu();
+  const menu = $("agent-menu");
+  menu.replaceChildren(...agents.map((a) => {
+    const b = row(a.name, a.installed ? "" : "Not installed", a.id === agentId, async () => {
+      if (!a.installed) return;
+      hideAgentMenu();
+      if (a.id === agentId) return;
+      const res = await post("/agent", { id: a.id });
+      if (!res.ok) addMessage({ role: "agent", kind: "error", text: (await res.json()).error });
+    });
+    b.setAttribute("role", "menuitemradio");
+    b.setAttribute("aria-checked", String(a.id === agentId));
+    // Not disabled, so its tooltip with the install command still shows.
+    if (!a.installed) {
+      b.setAttribute("aria-disabled", "true");
+      b.title = a.install;
+    }
+    return b;
+  }));
+  const box = $("agent").getBoundingClientRect();
+  menu.hidden = false;
+  menu.style.left = `${Math.min(box.left, innerWidth - menu.offsetWidth - 8)}px`;
+  menu.style.top = `${box.bottom + 4}px`;
+  $("agent").setAttribute("aria-expanded", "true");
+  menu.querySelector("button")?.focus();
+};
+addEventListener("pointerdown", (e) => {
+  if (!$("agent-menu").hidden && !$("agent-menu").contains(e.target) && !$("agent").contains(e.target)) hideAgentMenu();
+});
+function noAgentError(text) {
+  $("no-agent-error").textContent = text;
+  $("no-agent-error").hidden = !text;
+}
+$("agents-check").onclick = async () => {
+  const b = $("agents-check");
+  b.disabled = true;
+  noAgentError("");
+  try {
+    const res = await post("/agents", {});
+    const d = await res.json();
+    if (!res.ok) return noAgentError(d.error);
+    // A found agent hides this panel; otherwise the press needs an answer.
+    if (!d.installed.length) noAgentError("Still no agent found. Check that the install finished.");
+  } catch {
+    noAgentError("Could not reach Vibecad's server. Restart Vibecad.");
+  } finally {
+    b.disabled = false;
+  }
+};
+
 function setRunning(on, queued = 0) {
   running = on;
+  if (on) hideAgentMenu();
+  renderAgent();
   updateSend();
   const q = $("queued");
   q.hidden = queued === 0;
@@ -2422,6 +2503,7 @@ $("mic").onclick = () => (listening ? stopListening() : startListening());
 const typing = () => document.activeElement === input || ["number", "text"].includes(document.activeElement?.type) || $("picker").open;
 addEventListener("keydown", (e) => {
   if (!$("file-menu").hidden && e.key === "Escape") return hideFileMenu();
+  if (!$("agent-menu").hidden && e.key === "Escape") return hideAgentMenu();
   if ((e.metaKey || e.ctrlKey) && (e.key === "e" || e.key === "E") && !$("picker").open) {
     e.preventDefault();
     return exportOpenFile();
@@ -2472,6 +2554,8 @@ events.onmessage = (ev) => {
     applyProject(e);
     $("log").replaceChildren();
     e.log.forEach(addMessage);
+    agents = e.agents;
+    agentId = e.agent;
     setRunning(e.running, e.queued);
     if (!desktopReady) {
       desktopReady = true;
