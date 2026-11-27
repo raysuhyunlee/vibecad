@@ -268,7 +268,7 @@
 - the chat is read back from the agent's own transcript: opening a project shows its current session's conversation
 - the history button lists the project's past sessions, newest first, titled by their first message; opening one continues it from the next turn
 - vibecad's sessions are the transcripts whose first prompt starts with its intro, so the person's own sessions in the folder stay out
-- claude only for now: transcripts under `~/.claude/projects/`; codex lists none
+- claude's transcripts are under `~/.claude/projects/`; codex's are under `$CODEX_HOME` (default `~/.codex`) `/sessions/`, matched to the project by the cwd they record
 - messages sent during a turn queue and go in the next turn; stop is one button
 - permissions are preset for the session: file edits and the vibecad CLI
 - codex runs with `--skip-git-repo-check`, since a project need not be a git repo or trusted in codex

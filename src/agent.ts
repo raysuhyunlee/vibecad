@@ -73,13 +73,8 @@ const claudeHistory: History = {
     for (const name of readdirSync(dir)) {
       if (!name.endsWith(".jsonl")) continue;
       const file = join(dir, name);
-      // The first prompt sits near the top; a session file can be many megabytes.
-      const head = Buffer.alloc(64 * 1024);
-      const fd = openSync(file, "r");
-      const n = readSync(fd, head, 0, head.length, 0);
-      closeSync(fd);
       let title: string | undefined;
-      for (const line of head.subarray(0, n).toString().split("\n")) {
+      for (const line of head(file, 64 * 1024).split("\n")) {
         let e: any;
         try {
           e = JSON.parse(line);
@@ -115,6 +110,81 @@ const claudeHistory: History = {
           if (b.type === "text" && b.text) out.push({ role: "agent", kind: "text", text: b.text });
           if (b.type === "tool_use") out.push({ role: "agent", kind: "tool", text: `${b.name} ${short(b.input)}`.trim() });
         }
+      }
+    }
+    return out;
+  },
+};
+
+/** Reads the start of a file: the first prompt sits near the top, and a session file can be many megabytes. */
+function head(file: string, size: number) {
+  const buf = Buffer.alloc(size);
+  const fd = openSync(file, "r");
+  const n = readSync(fd, buf, 0, size, 0);
+  closeSync(fd);
+  return buf.subarray(0, n).toString();
+}
+
+function jsonLines(text: string) {
+  const out: any[] = [];
+  for (const line of text.split("\n")) {
+    try {
+      out.push(JSON.parse(line));
+    } catch {}
+  }
+  return out;
+}
+
+const textOf = (content: unknown) => (Array.isArray(content) ? content.map((c) => (typeof c?.text === "string" ? c.text : "")).join("") : "");
+
+// Codex keeps every session, of any folder, at <CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl.
+function codexFiles(dir = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "sessions")): string[] {
+  try {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+      d.isDirectory() ? codexFiles(join(dir, d.name)) : d.name.endsWith(".jsonl") ? [join(dir, d.name)] : []);
+  } catch {
+    return [];
+  }
+}
+export const codexHistory: History = {
+  list() {
+    const found: PastSession[] = [];
+    for (const file of codexFiles()) {
+      // Codex's own instructions come before the first prompt.
+      let id: string | undefined, title: string | undefined;
+      for (const e of jsonLines(head(file, 512 * 1024))) {
+        const p = e.payload ?? {};
+        if (e.type === "session_meta") {
+          if (p.cwd !== process.cwd()) break;
+          id = str(p.id);
+        } else if (id && e.type === "response_item" && p.type === "message" && p.role === "user") {
+          const text = textOf(p.content);
+          if (!text.startsWith(INTRO)) continue;
+          title = said(text)[0] ?? text.match(/^Viewing: (.+)$/m)?.[1] ?? "";
+          break;
+        }
+      }
+      if (id && title !== undefined) found.push({ id, title, updated: statSync(file).mtimeMs });
+    }
+    return found.sort((a, b) => b.updated - a.updated);
+  },
+  load(id) {
+    const file = /^[\w-]+$/.test(id) && codexFiles().find((f) => f.endsWith(`-${id}.jsonl`));
+    if (!file) return [];
+    const out: ChatMessage[] = [];
+    for (const e of jsonLines(readFileSync(file, "utf8"))) {
+      const p = e.payload ?? {};
+      if (e.type === "response_item" && p.type === "message") {
+        const text = textOf(p.content);
+        if (p.role === "user" && text.startsWith(INTRO)) for (const t of said(text)) out.push({ role: "user", kind: "text", text: t });
+        if (p.role === "assistant" && text) out.push({ role: "agent", kind: "text", text });
+      } else if (e.type === "event_msg" && p.type === "item_completed") {
+        const item = p.item ?? {};
+        if (item.type === "CommandExecution") {
+          const cmd = Array.isArray(item.command) ? item.command.at(-1) : item.command;
+          out.push({ role: "agent", kind: "tool", text: String(cmd ?? "").slice(0, 160) });
+        }
+        if (item.type === "FileChange") out.push({ role: "agent", kind: "tool", text: "Edit files" });
       }
     }
     return out;
@@ -256,6 +326,7 @@ const claude: Adapter = {
 };
 
 const codex: Adapter = {
+  history: codexHistory,
   catalog: async () => codexCatalog(),
   command(session, model, effort) {
     const options = [

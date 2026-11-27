@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgentRunner, claudeCatalog, codexCatalog, installedAgents, mergePath, missingAgent, onPath, pickAgent } from "../src/agent.ts";
+import { AgentRunner, INTRO, claudeCatalog, codexCatalog, codexHistory, installedAgents, mergePath, missingAgent, onPath, pickAgent } from "../src/agent.ts";
 
 const bin = () => mkdtempSync(join(tmpdir(), "vibecad-path-"));
 
@@ -85,4 +85,33 @@ test("claude's default names the alias it resolves to, with its version", () => 
   assert.deepEqual(c.models.map((m) => [m.id, m.name]), [["opus", "Opus 5.5"], ["claude-opus-5-5", "Opus 5.5"]]);
   assert.deepEqual([c.defaultModel, c.defaultEffort], ["opus", "medium"]);
   assert.deepEqual(claudeCatalog({}, null), { models: [], defaultModel: undefined, defaultEffort: undefined });
+});
+
+test("codex lists this folder's vibecad sessions and loads their conversation", () => {
+  const home = mkdtempSync(join(tmpdir(), "vibecad-codex-"));
+  const day = join(home, "sessions/2026/11/27");
+  mkdirSync(day, { recursive: true });
+  const line = (v: unknown) => JSON.stringify(v) + "\n";
+  const meta = (id: string, cwd: string) => line({ type: "session_meta", payload: { id, cwd } });
+  const user = (text: string) => line({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
+  writeFileSync(join(day, "rollout-a-s1.jsonl"),
+    meta("s1", process.cwd()) +
+    user("# AGENTS.md instructions") +
+    user(`${INTRO} Etc.\n\nViewing: main.cad.ts\nPerson said: "make it taller"`) +
+    line({ type: "event_msg", payload: { type: "item_completed", item: { type: "CommandExecution", command: ["/bin/zsh", "-lc", "cat main.cad.ts"] } } }) +
+    line({ type: "event_msg", payload: { type: "item_completed", item: { type: "FileChange" } } }) +
+    line({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Done." }] } }));
+  writeFileSync(join(day, "rollout-b-mine.jsonl"), meta("mine", process.cwd()) + user("a terminal session"));
+  writeFileSync(join(day, "rollout-c-other.jsonl"), meta("other", "/elsewhere") + user(`${INTRO}\nPerson said: "x"`));
+  const saved = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  try {
+    assert.deepEqual(codexHistory.list().map((s) => [s.id, s.title]), [["s1", "make it taller"]]);
+    assert.deepEqual(codexHistory.load("s1").map((m) => [m.role, m.kind, m.text]), [
+      ["user", "text", "make it taller"], ["agent", "tool", "cat main.cad.ts"], ["agent", "tool", "Edit files"], ["agent", "text", "Done."],
+    ]);
+  } finally {
+    if (saved === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = saved;
+  }
 });
