@@ -46,7 +46,7 @@ function startApp(config: unknown, name = "main", path = process.env.PATH, shell
   writeFileSync(shell, shellPath === null ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\necho "startup noise"\nprintf %s '${shellPath}'\n`, { mode: 0o755 });
   const child = spawn(process.execPath, [CLI, "dev", "--socket", sock(name)], {
     cwd: bare,
-    env: { ...process.env, HOME: home, USERPROFILE: home, PATH: path, SHELL: shell },
+    env: { ...process.env, HOME: home, USERPROFILE: home, PATH: path, SHELL: shell, VIBECAD_APP_DIRS: "" },
     stdio: ["ignore", "pipe", "ignore"],
   });
   child.on("close", () => rmSync(home, { recursive: true, force: true }));

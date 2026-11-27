@@ -138,6 +138,7 @@
 
 - `~/.vibecad/config.json`, per user because the app starts before any project opens; read when the app starts
 - `agent` (unset), `model` (agent default)
+- a codex bundled by a desktop app counts as on PATH, after the PATH folders: ChatGPT.app's on macOS, the Codex app's newest `%LOCALAPPDATA%\OpenAI\Codex\bin\<build>` on Windows
 - at start, when `agent` is unset or not on PATH, the app writes the first of `claude`, `codex` on PATH to the file, dropping `model`; with none on PATH there is no agent, the file is left as it is, and a turn says how to install one
 - the chat's agent picker writes `agent`, keeping the other keys; a change of agent drops `model`, which names one agent's model
 - every key is optional; an unknown key or a bad value stops the app with an error

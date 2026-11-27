@@ -252,6 +252,25 @@ export async function reloadPath() {
   process.env.PATH = mergePath(process.env.PATH ?? "", await freshPath());
 }
 
+/** Folders of agent CLIs that desktop apps bundle without adding them to PATH. */
+function appDirs(platform = process.platform, env = process.env): string[] {
+  if (platform === "darwin") return ["/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin"];
+  if (platform !== "win32" || !env.LOCALAPPDATA) return [];
+  // The Codex app keeps codex.exe in one folder per build; the newest is current.
+  const bin = join(env.LOCALAPPDATA, "OpenAI", "Codex", "bin");
+  try {
+    const builds = readdirSync(bin).map((d) => join(bin, d)).filter((d) => existsSync(join(d, "codex.exe")));
+    builds.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+    return builds.slice(0, 1);
+  } catch {
+    return [];
+  }
+}
+// VIBECAD_APP_DIRS replaces the list; tests set it empty.
+const APP_DIRS = process.env.VIBECAD_APP_DIRS ?? appDirs().join(process.platform === "win32" ? ";" : ":");
+// Added at the end, so a CLI the person installed still wins. The agents inherit it.
+process.env.PATH = mergePath(process.env.PATH ?? "", APP_DIRS);
+
 /** The agent CLIs on PATH. */
 export const installedAgents = (env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform) => AGENTS.filter((a) => onPath(a, env, platform));
 
