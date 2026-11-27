@@ -1,6 +1,6 @@
 // The desktop app: runs `vibecad dev` on Electron's own Node, on a local socket, and shows it in a window.
 import { app, BrowserWindow, dialog, Menu, MenuItem, nativeTheme, protocol, shell } from "electron";
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { request } from "node:http";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -50,6 +50,16 @@ function fail(message) {
   splash?.destroy();
   dialog.showErrorBox("Vibecad", message);
   app.quit();
+}
+
+/** Stops the server and everything it started. On Windows a plain kill leaves its children running, which lock the install folder. */
+function stopServer() {
+  if (!server || server.exitCode !== null || server.signalCode !== null) return;
+  if (process.platform === "win32" && server.pid) {
+    try { execFileSync("taskkill", ["/pid", String(server.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true }); return; }
+    catch {}
+  }
+  server.kill();
 }
 
 function start() {
@@ -226,6 +236,8 @@ function offerUpdate(info, { manual = false } = {}) {
     sendUpdateState({ phase: "installing" });
     // The server's exit on the way out must not show the crash dialog.
     quitting = true;
+    // Nothing of the old version may still run when the installer replaces its files.
+    stopServer();
     // Install silently and reopen the app.
     setupUpdater().quitAndInstall(true, true);
   });
@@ -327,5 +339,5 @@ app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => {
   quitting = true;
   clearTimeout(startupTimer);
-  server?.kill();
+  stopServer();
 });

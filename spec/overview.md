@@ -152,6 +152,7 @@
 - closing the splash cancels startup; a startup timeout or load failure shows an error and quits
 - the desktop app runs `vibecad dev --socket <path>` as a child, on a local socket in its data folder, and its window loads `vibecad://app/`, whose requests it passes to that socket; so it opens no port and clashes with no other app; one runs at a time; `dev` takes no file
 - the server stopping, or failing to start, shows an error and quits the desktop app
+- quitting, or installing an update, stops the server with every process it started (the whole process tree on Windows), so none keeps the install folder locked
 - `.vibecad/dev.json` records the server's socket, so `vibecad show` reaches it
 - the desktop app reads PATH from the login shell, so the agent CLIs are found when started from Finder; builds and the agent run vibecad's CLI on the app's own Node, with `ELECTRON_RUN_AS_NODE`
 - each start of the packaged app writes a `vibecad` launcher in `~/.vibecad/bin` that runs its CLI on its own Node (`vibecad.cmd` on Windows), and puts that folder on PATH once: a line in `~/.zshrc` or `~/.bashrc` (and `~/.bash_profile` on macOS) for zsh or bash, the user PATH on Windows; other shells get no PATH line; an AppImage mounts at a new path each run, so its launcher runs the AppImage with `VIBECAD_CLI=1`, and the app relays its arguments to the CLI and exits with its code
